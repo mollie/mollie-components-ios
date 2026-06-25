@@ -1,0 +1,45 @@
+included:
+  - Sources
+  - Tests
+
+excluded:
+  - .build
+  - Examples
+  - Package.swift
+
+disabled_rules:
+  - trailing_whitespace
+  - line_length
+  - type_body_length
+  - file_length
+  - function_body_length
+  - trailing_comma
+  # Some imports are wrapped in a compile-time gate: a testing import in one branch
+  # and a plain import in the other. SwiftLint counts both branches and false-flags
+  # the pair as a duplicate import. The public release tree collapses the gate to a
+  # single clean import, so this is disabled to keep the pattern linting cleanly.
+  - duplicate_imports
+
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+  - contains_over_filter_count
+  - contains_over_first_not_nil
+  - discouraged_optional_boolean
+  - empty_string
+  - fatal_error_message
+  - first_where
+  - force_unwrapping
+  - implicitly_unwrapped_optional
+  - last_where
+  - modifier_order
+  - overridden_super_call
+  - private_action
+  - redundant_nil_coalescing
+  - sorted_first_last
+  - unavailable_function
+  - unowned_variable_capture
+  - vertical_whitespace_closing_braces
+
+analyzer_rules:
+  - unused_declaration

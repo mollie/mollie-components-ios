@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure Homebrew tools are on PATH (git hooks don't inherit shell config)
+eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+
+echo "→ swift build"
+swift build -c release
+
+echo "→ swift test"
+swift test
+
+echo "✓ pre-push passed"

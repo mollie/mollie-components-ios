@@ -1,0 +1,8 @@
+--swiftversion 5.9
+--indent 4
+--maxwidth 120
+--commas always
+--semicolons never
+--stripunusedargs closure-only
+--self remove
+--importgrouping testable-bottom
