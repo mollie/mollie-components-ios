@@ -12,12 +12,6 @@ Each example screen is written to be read on its own: open the file, follow the 
 - **Paste-token flow** — try every flow end-to-end without standing up a backend by pasting a client access token you generated elsewhere.
 - **Result + deep-link handling** — render the typed `MolliePaymentResult` and route a return-URL redirect to a success screen.
 
-## Screenshot
-
-![Demo app menu](docs/screenshot-placeholder.png)
-
-> **Placeholder.** This image path does not exist yet — replace it with a real screenshot of the running app.
-
 ## To run
 
 1. Open `Examples/MollieCheckoutDemo/MollieCheckoutDemo.xcodeproj` in Xcode 16+.

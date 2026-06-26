@@ -23,13 +23,23 @@
         /// custom scheme → prefix match + `UIApplication.open` handoff;
         /// http/https → host equality, in-WebView render.
         private let merchantReturnURL: URL?
+        /// How long the WebView stays hidden behind the "Authenticating…" cover
+        /// before being revealed. Frictionless / 3DS-method flows resolve (or the
+        /// poll loop dismisses the sheet) before this elapses, so the raw WebView
+        /// is never shown; a real interactive challenge outlives it and is
+        /// revealed. Injectable for tests. See epic t330.
+        private let revealDelay: TimeInterval
         private var resolved = false
+        private var revealed = false
         private var webView: WKWebView?
+        private var coverView: UIView?
+        private var revealTask: Task<Void, Never>?
         private var messageHandler: ThreeDSMessageHandler?
 
-        init(challengeURL: URL, merchantReturnURL: URL? = nil) {
+        init(challengeURL: URL, merchantReturnURL: URL? = nil, revealDelay: TimeInterval = 3.0) {
             self.challengeURL = challengeURL
             self.merchantReturnURL = merchantReturnURL
+            self.revealDelay = revealDelay
             super.init(nibName: nil, bundle: nil)
         }
 
@@ -93,6 +103,13 @@
             view.addSubview(webView)
             webView.load(URLRequest(url: challengeURL))
             self.webView = webView
+            // Keep the WebView hidden behind a branded "Authenticating…" cover.
+            // It is revealed only if a real interactive challenge outlives
+            // `revealDelay`; frictionless / 3DS-method flows resolve (or the sheet
+            // is dismissed by the poll loop) first, so the raw WebView never shows.
+            webView.accessibilityElementsHidden = true
+            installAuthenticatingCover()
+            scheduleReveal()
             // Pushed onto the host's nav stack — UIKit renders the system back
             // button automatically, and the coordinator observes the resulting
             // pop to surface `.cancelled`. No explicit Cancel item required.
@@ -102,7 +119,94 @@
         private func resolve(_ result: ThreeDSResult) {
             guard !resolved else { return }
             resolved = true
+            // The flow terminated (navigation match / cancel) before any reveal;
+            // make sure the deferred reveal can never fire afterwards.
+            revealTask?.cancel()
+            revealTask = nil
             onResult?(result)
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            // Covers the poll-driven dismissal path: the coordinator may tear the
+            // sheet down (e.g. a frictionless attempt completing via polling)
+            // without a navigation-level resolve. Cancel the reveal so the raw
+            // WebView is never flashed on the way out.
+            revealTask?.cancel()
+            revealTask = nil
+        }
+
+        // MARK: - Authenticating cover (deferred reveal)
+
+        private func scheduleReveal() {
+            revealTask?.cancel()
+            let delay = revealDelay
+            revealTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                if Task.isCancelled { return }
+                self?.revealWebView()
+            }
+        }
+
+        /// Reveal the live WebView by removing the "Authenticating…" cover.
+        /// Single-shot, and a no-op once the flow has resolved. Internal so unit
+        /// tests can drive the reveal deterministically without racing the timer.
+        func revealWebView() {
+            guard !revealed, !resolved else { return }
+            revealed = true
+            webView?.accessibilityElementsHidden = false
+            if let webView { UIAccessibility.post(notification: .screenChanged, argument: webView) }
+            guard let cover = coverView else { return }
+            coverView = nil
+            UIView.animate(withDuration: 0.2, animations: {
+                cover.alpha = 0
+            }, completion: { _ in
+                cover.removeFromSuperview()
+            })
+        }
+
+        @objc private func cancelTapped() {
+            resolve(.cancelled)
+        }
+
+        private func installAuthenticatingCover() {
+            let cover = UIView(frame: view.bounds)
+            cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            cover.backgroundColor = .systemBackground
+
+            let spinner = UIActivityIndicatorView(style: .large)
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            spinner.startAnimating()
+
+            let label = UILabel()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.text = "Authenticating securely…"
+            label.textColor = .secondaryLabel
+            label.font = .preferredFont(forTextStyle: .body)
+            label.textAlignment = .center
+            label.numberOfLines = 0
+
+            let cancel = UIButton(type: .system)
+            cancel.translatesAutoresizingMaskIntoConstraints = false
+            cancel.setTitle("Cancel", for: .normal)
+            cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
+
+            cover.addSubview(spinner)
+            cover.addSubview(label)
+            cover.addSubview(cancel)
+            view.addSubview(cover)
+            coverView = cover
+
+            NSLayoutConstraint.activate([
+                spinner.centerXAnchor.constraint(equalTo: cover.centerXAnchor),
+                spinner.centerYAnchor.constraint(equalTo: cover.centerYAnchor),
+                label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 16),
+                label.leadingAnchor.constraint(greaterThanOrEqualTo: cover.leadingAnchor, constant: 24),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: cover.trailingAnchor, constant: -24),
+                label.centerXAnchor.constraint(equalTo: cover.centerXAnchor),
+                cancel.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 24),
+                cancel.centerXAnchor.constraint(equalTo: cover.centerXAnchor),
+            ])
         }
 
         // MARK: - WKNavigationDelegate

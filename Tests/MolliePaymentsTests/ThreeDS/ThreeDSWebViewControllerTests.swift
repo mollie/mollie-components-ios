@@ -403,6 +403,70 @@
             ucc.removeScriptMessageHandler(forName: "mollieChallenge")
         }
 
+        // MARK: - Deferred reveal (heuristic) — epic t330
+
+        func test_viewDidLoad_hidesWebViewBehindAuthenticatingCover() throws {
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            // Large revealDelay so the deferred reveal can't fire mid-test.
+            let controller = ThreeDSWebViewController(challengeURL: url, revealDelay: 1000)
+            _ = controller.view
+            let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
+            let cover = try XCTUnwrap(Mirror(reflecting: controller).descendant("coverView") as? UIView)
+            XCTAssertTrue(controller.view.subviews.contains(cover), "Authenticating cover must be in the hierarchy")
+            XCTAssertEqual(controller.view.subviews.last, cover, "Cover must sit above the WebView")
+            XCTAssertTrue(
+                webView.accessibilityElementsHidden,
+                "WebView must be hidden from assistive tech while covered"
+            )
+            XCTAssertTrue(
+                cover.subviews.contains { $0 is UIActivityIndicatorView },
+                "Cover must show an activity indicator"
+            )
+        }
+
+        func test_revealWebView_restoresWebViewAccessibility() throws {
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(challengeURL: url, revealDelay: 1000)
+            _ = controller.view
+            let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
+            XCTAssertTrue(webView.accessibilityElementsHidden)
+            controller.revealWebView()
+            XCTAssertFalse(
+                webView.accessibilityElementsHidden,
+                "Revealing the challenge must expose the WebView to assistive tech"
+            )
+        }
+
+        func test_cancelButton_resolvesCancelled_andBlocksLaterReveal() throws {
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(challengeURL: url, revealDelay: 1000)
+            _ = controller.view
+            var result: ThreeDSResult?
+            controller.onResult = { result = $0 }
+            let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
+            let cover = try XCTUnwrap(Mirror(reflecting: controller).descendant("coverView") as? UIView)
+            let cancel = try XCTUnwrap(Self.firstButton(in: cover), "Cover must expose a Cancel button")
+
+            cancel.sendActions(for: .touchUpInside)
+            XCTAssertEqual(result, .cancelled, "Cancel must resolve the flow as cancelled")
+
+            // Once resolved, a later (timer-driven) reveal must be a no-op so a
+            // frictionless / cancelled flow never flashes the raw WebView.
+            controller.revealWebView()
+            XCTAssertTrue(
+                webView.accessibilityElementsHidden,
+                "Reveal after resolution must be a no-op"
+            )
+        }
+
+        private static func firstButton(in view: UIView) -> UIButton? {
+            for sub in view.subviews {
+                if let button = sub as? UIButton { return button }
+                if let found = firstButton(in: sub) { return found }
+            }
+            return nil
+        }
+
         private final class ProbeHandler: NSObject, WKScriptMessageHandler {
             func userContentController(_: WKUserContentController, didReceive _: WKScriptMessage) {}
         }
