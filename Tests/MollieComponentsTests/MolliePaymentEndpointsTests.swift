@@ -1,4 +1,5 @@
 import Foundation
+import MollieCore
 import XCTest
 
 // Not @testable — .production and .urlSession are public surface. These
@@ -62,6 +63,22 @@ final class MolliePaymentEndpointsTests: XCTestCase {
         XCTAssertFalse(
             MolliePaymentEndpoints.production.urlSession === URLSession.shared,
             "production must use a tuned session, not URLSession.shared"
+        )
+    }
+
+    // MARK: - .production enforces SPKI pinning
+
+    //
+    // The production session's delegate must be a PinningURLSessionDelegate —
+    // that's what actually enforces productionPins against the GTS chain on
+    // every TLS handshake. Losing this delegate (e.g. a regression back to a
+    // delegate-less session) would silently drop pinning while every other
+    // production test above kept passing.
+
+    func test_production_urlSession_hasPinningDelegate() {
+        XCTAssertTrue(
+            MolliePaymentEndpoints.production.urlSession.delegate is PinningURLSessionDelegate,
+            "production must enforce SPKI pinning via a PinningURLSessionDelegate"
         )
     }
 }

@@ -57,6 +57,35 @@ final class SessionEventConsumerTests: XCTestCase {
     }
     """
 
+    /// Production emits the 3DS challenge/ACS URL under `challengeUrl` (camelCase,
+    /// PayProc path) — NOT `challenge_url`. `params` is a raw [String: AnyCodable]
+    /// dict whose keys are not snake→camel converted, so the SDK must match the
+    /// literal production key. Regression fixture for PXP-5009.
+    private let threeDSChallengeCamelJSON = """
+    {
+        "session_token": "sess_abc123",
+        "status": "open",
+        "next_action": {
+            "action_type": "threeDsChallenge",
+            "params": { "challengeUrl": "https://3ds.example.com/challenge" }
+        },
+        "payment_amount": { "amount": "10.00", "currency": "EUR" }
+    }
+    """
+
+    /// The 3DS-v2 event path emits the ACS URL under `acsURL`.
+    private let threeDSChallengeACSJSON = """
+    {
+        "session_token": "sess_abc123",
+        "status": "open",
+        "next_action": {
+            "action_type": "threeDsChallenge",
+            "params": { "acsURL": "https://3ds.example.com/challenge" }
+        },
+        "payment_amount": { "amount": "10.00", "currency": "EUR" }
+    }
+    """
+
     private let threeDSMissingURLJSON = """
     {
         "session_token": "sess_abc123",
@@ -165,6 +194,44 @@ final class SessionEventConsumerTests: XCTestCase {
         guard case .sessionCompleted = events[2] else {
             return XCTFail("Expected .sessionCompleted, got \(events[2])")
         }
+    }
+
+    func test_observe_threeDSAction_camelChallengeUrl_emitsChallengeReady() async throws {
+        // PXP-5009 regression: production sends `challengeUrl` (camelCase), not
+        // `challenge_url`. Before the fix the SDK read only `challenge_url`, so
+        // the challenge was never surfaced and polling timed out.
+        let mock = MockHTTPClient()
+        try mock.enqueue(decodeSession(threeDSChallengeCamelJSON))
+        try mock.enqueue(decodeSession(completedSessionJSON))
+
+        let consumer = makeConsumer(mock: mock)
+        var events: [ChannelEvent] = []
+        for try await event in consumer.observe(sessionToken: "sess_abc123") {
+            events.append(event)
+        }
+
+        guard case let .threeDSChallengeReady(url) = events[1] else {
+            return XCTFail("Expected .threeDSChallengeReady for `challengeUrl`, got \(events[1])")
+        }
+        XCTAssertEqual(url, URL(string: "https://3ds.example.com/challenge"))
+    }
+
+    func test_observe_threeDSAction_acsURL_emitsChallengeReady() async throws {
+        // PXP-5009 regression: the 3DS-v2 event path emits `acsURL`.
+        let mock = MockHTTPClient()
+        try mock.enqueue(decodeSession(threeDSChallengeACSJSON))
+        try mock.enqueue(decodeSession(completedSessionJSON))
+
+        let consumer = makeConsumer(mock: mock)
+        var events: [ChannelEvent] = []
+        for try await event in consumer.observe(sessionToken: "sess_abc123") {
+            events.append(event)
+        }
+
+        guard case let .threeDSChallengeReady(url) = events[1] else {
+            return XCTFail("Expected .threeDSChallengeReady for `acsURL`, got \(events[1])")
+        }
+        XCTAssertEqual(url, URL(string: "https://3ds.example.com/challenge"))
     }
 
     func test_observe_threeDSAction_missingURL_yieldsUpdateInstead() async throws {
@@ -394,9 +461,14 @@ final class SessionEventConsumerTests: XCTestCase {
         XCTAssertNotNil(details)
     }
 
-    func test_observe_threeDSChallengeURL_snakeCaseKey_emitsChallengeReady() async throws {
-        // Regression: wire key is "challenge_url" (snake_case); dictionary lookup is literal.
-        // A camelCase key ("challengeUrl") would silently return nil and fall back to .sessionUpdated.
+    func test_observe_threeDSChallengeURL_snakeAndCamelKeys_bothEmitChallengeReady() async throws {
+        // PXP-5009: `params` is a raw [String: AnyCodable] dict whose keys are
+        // NOT snake→camel converted, so the SDK matches literal wire keys. Both
+        // the production `challengeUrl` (camelCase) and the dev-harness/mock
+        // `challenge_url` (snake_case) must surface the challenge. A prior
+        // version read ONLY `challenge_url`, silently dropping the real
+        // production challenge → the WebView never presented and polling timed
+        // out with `checkout-attempt-polling`.
         let snakeCaseJSON = """
         {
             "session_token": "sess_abc123",
@@ -423,8 +495,8 @@ final class SessionEventConsumerTests: XCTestCase {
         let snakeResponse = try decodeSession(snakeCaseJSON)
         let camelResponse = try decodeSession(camelCaseJSON)
         let completed = try decodeSession(completedSessionJSON)
-        mock.enqueue(snakeResponse) // snake_case → should emit .threeDSChallengeReady
-        mock.enqueue(camelResponse) // camelCase → should emit .sessionUpdated (key mismatch)
+        mock.enqueue(snakeResponse) // snake_case → .threeDSChallengeReady (mock/legacy fallback)
+        mock.enqueue(camelResponse) // camelCase → .threeDSChallengeReady (production key)
         mock.enqueue(completed)
 
         let consumer = makeConsumer(mock: mock)
@@ -433,21 +505,19 @@ final class SessionEventConsumerTests: XCTestCase {
             events.append(event)
         }
 
-        // Action events (.threeDSChallengeReady) are preceded by a synthetic
-        // .sessionUpdated; see yieldEvents(for:into:) in SessionEventConsumer.
-        XCTAssertEqual(events.count, 4)
-        guard case .sessionUpdated = events[0] else {
-            return XCTFail("Expected .sessionUpdated before action event, got \(events[0])")
-        }
-        guard case let .threeDSChallengeReady(url) = events[1] else {
+        // Each challenge poll yields a synthetic .sessionUpdated then
+        // .threeDSChallengeReady; the final poll yields .sessionCompleted.
+        XCTAssertEqual(events.count, 5)
+        guard case let .threeDSChallengeReady(url1) = events[1] else {
             return XCTFail("Expected .threeDSChallengeReady for snake_case key, got \(events[1])")
         }
-        XCTAssertEqual(url.absoluteString, "https://3ds.example.com/acs")
-        guard case .sessionUpdated = events[2] else {
-            return XCTFail("Expected .sessionUpdated for camelCase key (mismatch), got \(events[2])")
+        XCTAssertEqual(url1.absoluteString, "https://3ds.example.com/acs")
+        guard case let .threeDSChallengeReady(url2) = events[3] else {
+            return XCTFail("Expected .threeDSChallengeReady for camelCase key, got \(events[3])")
         }
-        guard case .sessionCompleted = events[3] else {
-            return XCTFail("Expected .sessionCompleted, got \(events[3])")
+        XCTAssertEqual(url2.absoluteString, "https://3ds.example.com/acs")
+        guard case .sessionCompleted = events[4] else {
+            return XCTFail("Expected .sessionCompleted, got \(events[4])")
         }
     }
 

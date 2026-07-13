@@ -8,12 +8,18 @@ import MollieCore
     /// Receives postMessage events bridged from the ACS page (see the user
     /// script injected in `ThreeDSWebViewController`). Message contract:
     ///   name: "mollieChallenge"
-    ///   body: { sender: "mollie-interceptor", type: "complete"|"error"|"canceled", errorCode: Int }
+    ///   body: { sender: "mollie-interceptor", type: "challenge"|"complete"|"error"|"canceled", errorCode: Int }
+    ///
+    /// Events are delivered as `ThreeDSBridgeEvent`: a `type:"challenge"`
+    /// surfaces as the non-terminal `.challengeEscalation` (the controller
+    /// reveals the WebView), while `complete`/`error`/`canceled` surface as a
+    /// terminal `.result`. An ACS-level frictionless auth emits `complete` with
+    /// no preceding `challenge`, so the WebView never reveals.
     final class ThreeDSMessageHandler: NSObject, WKScriptMessageHandler {
-        private let onResult: @MainActor (ThreeDSResult) -> Void
+        private let onEvent: @MainActor (ThreeDSBridgeEvent) -> Void
 
-        init(onResult: @escaping @MainActor (ThreeDSResult) -> Void) {
-            self.onResult = onResult
+        init(onEvent: @escaping @MainActor (ThreeDSBridgeEvent) -> Void) {
+            self.onEvent = onEvent
         }
 
         func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -22,14 +28,18 @@ import MollieCore
                 // (which is owned by another agent's MR). Stable token: "dropped: <reason>".
                 return
             }
-            guard let result = Self.parse(name: message.name, body: message.body) else {
+            guard let event = Self.parseBridgeEvent(name: message.name, body: message.body) else {
                 return
             }
-            // Result delivery is single-shot at the resolver layer
+            // Capture every accepted interceptor message — including the
+            // non-terminal `challenge` — so DevTools / logs can confirm against
+            // production which event types actually arrive on each 3DS path.
+            // Terminal delivery is single-shot at the resolver layer
             // (`ThreeDSWebViewController.resolve(_:)` guards on `resolved`), so
             // even if two ACS messages race onto the main actor in quick succession
-            // only the first lands. No extra serial-arrival guard needed here.
-            Task { @MainActor in onResult(result) }
+            // only the first terminal one lands. A `.challengeEscalation` is
+            // non-terminal and only reveals the WebView — it never resolves.
+            Task { @MainActor in onEvent(event) }
         }
 
         /// Extracts only the non-PCI fields (`type`, `errorCode`) from the
@@ -75,6 +85,22 @@ import MollieCore
             default:
                 return nil
             }
+        }
+
+        /// Bridge-event parser: distinguishes the non-terminal `challenge`
+        /// escalation (interactive UI about to show) from a terminal
+        /// `ThreeDSResult`. A `type == "challenge"` message with a valid sender
+        /// yields `.challengeEscalation`; every other valid message delegates to
+        /// `parse` and is wrapped in `.result`. Malformed / non-interceptor
+        /// bodies return nil. `package` so unit tests can exercise it directly.
+        package static func parseBridgeEvent(name: String, body: Any) -> ThreeDSBridgeEvent? {
+            guard name == "mollieChallenge",
+                  let dict = body as? [String: Any],
+                  let sender = dict["sender"] as? String, sender == "mollie-interceptor",
+                  let type = dict["type"] as? String else { return nil }
+            if type == "challenge" { return .challengeEscalation }
+            guard let result = parse(name: name, body: body) else { return nil }
+            return .result(result)
         }
     }
 #endif

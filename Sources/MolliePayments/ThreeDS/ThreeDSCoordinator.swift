@@ -73,7 +73,29 @@
         /// coordinator (and its captured `nav`) alive for the full timeout.
         private var watchdogTask: Task<Void, Never>?
 
+        /// Set while a presentation is in flight; torn down by `dismiss()`.
+        ///
+        /// PXP-5009: `CardPaymentCoordinator.drainEvents` races this
+        /// presenter against continued poll-stream draining, because a
+        /// frictionless hosted 3DS page completes the payment server-side
+        /// without ever navigating to the return URL or firing the
+        /// `mollie-interceptor` postMessage — leaving `present`/
+        /// `presentRedirect` stranded even after the poller has already
+        /// observed `.sessionCompleted`/`.sessionFailed`. When the poll side
+        /// wins, the coordinator calls `dismiss()` (see `ChallengePresenting`)
+        /// to tear down the modal/pushed WebView and resolve the pending
+        /// continuation as `.cancelled` instead of leaving it stranded until
+        /// the 5-minute watchdog.
+        private var activeDismiss: (@MainActor () -> Void)?
+
         init() {}
+
+        func dismiss() async {
+            await MainActor.run { [weak self] in
+                self?.activeDismiss?()
+                self?.activeDismiss = nil
+            }
+        }
 
         func present(challengeURL: URL, in container: any ChallengeContainer) async -> ThreeDSResult {
             await presentOnMain(challengeURL: challengeURL, merchantReturnURL: nil, in: container)
@@ -95,15 +117,30 @@
         }
 
         func presentRedirect(url: URL, returnURL: URL?, in container: any ChallengeContainer) async -> ThreeDSResult {
-            await presentOnMain(challengeURL: url, merchantReturnURL: returnURL, in: container)
+            // The hosted redirect page (pay.mollie.nl/payment/prepare-authentication)
+            // runs no `mollie-interceptor` and emits no `challenge` postMessage,
+            // so it cannot be revealed event-driven. Use the eager short-delay
+            // present: the hosted page emits no `challenge`, so there is nothing to
+            // gate on. We host it off-screen and only present it if it hasn't
+            // resolved (navigated back to the merchant return URL) within the
+            // watchdog window — giving a frictionless redirect the chance to finish
+            // invisibly, while a genuinely interactive hosted page surfaces after
+            // the delay. Empirically tunable.
+            await presentOnMain(
+                challengeURL: url,
+                merchantReturnURL: returnURL,
+                revealPolicy: .eager(delay: 10),
+                in: container
+            )
         }
 
-        // swiftlint:disable opening_brace
+        // swiftlint:disable opening_brace cyclomatic_complexity
         @MainActor
         private func presentOnMain(challengeURL: URL, merchantReturnURL: URL?,
+                                   revealPolicy: ThreeDSWebViewController.RevealPolicy = .challengeDriven(watchdog: 15),
                                    in container: any ChallengeContainer) async -> ThreeDSResult
         {
-            // swiftlint:enable opening_brace
+            // swiftlint:enable opening_brace cyclomatic_complexity
             // Modal path — preferred for Phase 4 sheet-based UI. Presents the
             // 3DS WebView modally from a host VC; swipe-to-dismiss resolves
             // `.cancelled` via `ModalDismissDelegate`. A 5-minute watchdog
@@ -111,61 +148,112 @@
             if let vcContainer = container as? ViewControllerChallengeContainer {
                 return await withCheckedContinuation { (continuation: CheckedContinuation<ThreeDSResult, Never>) in
                     // Resolver cancels the watchdog on the winning resolution path,
-                    // so the 5-minute sleep doesn't retain `nav` after early completion.
+                    // so the 5-minute sleep doesn't retain anything after completion.
                     let resolver = ContinuationResolver(continuation: continuation) { [weak self] in
-                        // Hop to the main actor because the watchdog Task is
-                        // also mutated from the main-actor-bound presentation
-                        // path; doing both reads/writes on the same actor
-                        // sidesteps the `@unchecked Sendable` storage race.
                         Task { @MainActor in
                             self?.watchdogTask?.cancel()
                             self?.watchdogTask = nil
+                            self?.activeDismiss = nil
                         }
                     }
+                    // Present-on-demand: load the WebView OFF-SCREEN so its 3DS
+                    // round-trip runs invisibly while the merchant's own UI stays
+                    // on screen. We present a modal ONLY when the controller asks
+                    // (a `challenge` event, or its watchdog) — a frictionless flow
+                    // resolves first and is torn down without ever presenting, so
+                    // the user sees no intermediary screen.
                     let webVC = ThreeDSWebViewController(
                         challengeURL: challengeURL,
-                        merchantReturnURL: merchantReturnURL
+                        merchantReturnURL: merchantReturnURL,
+                        revealPolicy: revealPolicy,
+                        presentOnDemand: true
                     )
 
-                    let dismissDelegate = ModalDismissDelegate { resolver.resolve(emitting: .cancelled) }
+                    // Shared main-actor reference to the modal once (if) presented.
+                    var presentedNav: UINavigationController?
 
-                    let nav = UINavigationController(rootViewController: webVC)
-                    nav.modalPresentationStyle = .fullScreen
-                    nav.presentationController?.delegate = dismissDelegate
+                    // `vcContainer` is captured STRONGLY: presentation is deferred
+                    // (watchdog / challenge event), so the container must outlive
+                    // the synchronous setup or `present()` would silently no-op and
+                    // the flow would hang on the merchant spinner. Released when the
+                    // watchdog (which strongly holds `webVC`) is torn down on resolve.
+                    let present: @MainActor () -> Void = { [weak webVC] in
+                        guard let webVC, presentedNav == nil else { return }
+                        // Re-parent the already-loaded view out of the window; UIKit
+                        // moves it into the nav on present (no reload).
+                        webVC.view.removeFromSuperview()
+                        webVC.view.isUserInteractionEnabled = true
+                        let nav = UINavigationController(rootViewController: webVC)
+                        nav.modalPresentationStyle = .fullScreen
+                        let dismissDelegate = ModalDismissDelegate { resolver.resolve(emitting: .cancelled) }
+                        nav.presentationController?.delegate = dismissDelegate
+                        // UIKit only weakly retains presentation-controller delegates.
+                        objc_setAssociatedObject(
+                            nav,
+                            &Self.dismissDelegateKey,
+                            dismissDelegate,
+                            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+                        )
+                        presentedNav = nav
+                        vcContainer.presentingViewController.present(nav, animated: true)
+                    }
+                    webVC.onNeedsPresentation = present
 
-                    webVC.onResult = { [weak nav] result in
-                        resolver.resolve(emitting: result)
-                        // Tear the modal down ourselves on a programmatic
-                        // result so the merchant doesn't see a stranded
-                        // sheet after `.authenticated` / `.failed`.
-                        nav?.presentingViewController?.dismiss(animated: true)
+                    // Wired for `dismiss()` (PXP-5009 poll-race): tears down
+                    // whatever is currently showing (presented modal, or the
+                    // hidden off-screen host) and resolves `.cancelled`.
+                    activeDismiss = { [weak webVC] in
+                        if let nav = presentedNav {
+                            nav.presentingViewController?.dismiss(animated: true)
+                        } else {
+                            webVC?.view.removeFromSuperview()
+                        }
+                        resolver.resolve(emitting: .cancelled)
                     }
 
-                    // Keep the dismiss delegate alive for the lifetime of the
-                    // presentation. UIKit only weakly retains presentation
-                    // controller delegates.
-                    objc_setAssociatedObject(
-                        nav,
-                        &Self.dismissDelegateKey,
-                        dismissDelegate,
-                        .OBJC_ASSOCIATION_RETAIN_NONATOMIC
-                    )
+                    webVC.onResult = { [weak webVC] result in
+                        resolver.resolve(emitting: result)
+                        if let nav = presentedNav {
+                            // Tear the modal down so the merchant doesn't see a
+                            // stranded sheet after a terminal result.
+                            nav.presentingViewController?.dismiss(animated: true)
+                        } else {
+                            // Never presented (frictionless) — drop the hidden host.
+                            webVC?.view.removeFromSuperview()
+                        }
+                    }
 
-                    vcContainer.presentingViewController.present(nav, animated: true)
+                    // Host the controller's view behind the merchant UI in the
+                    // on-screen window — occluded but in a live window so WebKit keeps
+                    // the page's JS running (`isUserInteractionEnabled=false` so it
+                    // can't steal a touch). With no window to hide behind, surface
+                    // immediately rather than run the flow invisibly.
+                    webVC.view.isUserInteractionEnabled = false
+                    if let hostWindow = vcContainer.presentingViewController.viewIfLoaded?.window {
+                        webVC.view.frame = hostWindow.bounds
+                        webVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                        hostWindow.insertSubview(webVC.view, at: 0)
+                    } else {
+                        webVC.loadViewIfNeeded()
+                        present()
+                    }
 
-                    // 5-minute watchdog. ACS pages that hang indefinitely
-                    // would otherwise strand the awaiting continuation.
-                    // `[weak self, weak nav]` so the watchdog never extends
-                    // coordinator or nav-controller lifetime; cancellation from
-                    // the resolver tears it down on early completion.
-                    watchdogTask = Task { [weak nav] in
+                    // 5-minute watchdog. ACS pages that hang indefinitely would
+                    // otherwise strand the awaiting continuation. Tears down
+                    // whatever is showing (or the hidden host). Holds `webVC`
+                    // STRONGLY so the off-screen controller (and, through its
+                    // `onNeedsPresentation`, the container) survives until the flow
+                    // resolves — the watchdog is cancelled on resolve, releasing it.
+                    watchdogTask = Task { [webVC] in
                         try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
                         if Task.isCancelled { return }
                         if !resolver.hasResolved {
                             await MainActor.run {
-                                nav?.presentingViewController?.dismiss(animated: true)
-                                // Stable reason token (`"timeout"`) — DevTools / tests
-                                // can match on it without parsing free-form messages.
+                                if let nav = presentedNav {
+                                    nav.presentingViewController?.dismiss(animated: true)
+                                } else {
+                                    webVC.view.removeFromSuperview()
+                                }
                                 resolver.resolve(emitting: .failed(reason: .sdkError(message: "timeout")))
                             }
                         }
@@ -185,12 +273,31 @@
                 )
             }
             return await withCheckedContinuation { (continuation: CheckedContinuation<ThreeDSResult, Never>) in
-                let webVC = ThreeDSWebViewController(challengeURL: challengeURL)
-                let resolver = ContinuationResolver(continuation: continuation)
+                let webVC = ThreeDSWebViewController(challengeURL: challengeURL, revealPolicy: revealPolicy)
+                let resolver = ContinuationResolver(continuation: continuation) { [weak self] in
+                    Task { @MainActor in
+                        self?.activeDismiss = nil
+                    }
+                }
 
                 uiContainer.challengeVC = webVC
                 uiContainer.onPop = { [weak uiContainer] in
                     uiContainer?.challengeVC = nil
+                    resolver.resolve(emitting: .cancelled)
+                }
+
+                // Wired for `dismiss()` (PXP-5009 poll-race): pops the pushed
+                // challenge VC (if still on top) and resolves `.cancelled`.
+                activeDismiss = { [weak uiContainer, weak webVC] in
+                    guard let uiContainer, let webVC else {
+                        resolver.resolve(emitting: .cancelled)
+                        return
+                    }
+                    uiContainer.onPop = nil
+                    uiContainer.challengeVC = nil
+                    if uiContainer.navigationController.topViewController === webVC {
+                        uiContainer.navigationController.popViewController(animated: true)
+                    }
                     resolver.resolve(emitting: .cancelled)
                 }
 

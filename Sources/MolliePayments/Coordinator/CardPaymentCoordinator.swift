@@ -187,13 +187,20 @@ public final class CardPaymentCoordinator: Sendable {
         MollieLogger.log("Coordinator", "step 2: PATCH /details sessionToken=...\(sessionToken.suffix(4))")
         let fingerprint = await DeviceFingerprintBuilder.current()
         let detailsBody = SessionPatchRequest.creditCard(token: pspToken, fingerprint: fingerprint)
-        _ = try await sessionsClient.perform(
+        let patched = try await sessionsClient.perform(
             SessionEndpoint.updateDetails(sessionToken: sessionToken, body: detailsBody)
         )
         MollieLogger.log("Coordinator", "step 2 done")
 
-        // 3. Drain session events until a terminal state.
-        return try await drainEvents(stream: sessionEventConsumer.observe(sessionToken: sessionToken))
+        // 3. Drain session events until a terminal state. Seed the drain with
+        // the PATCH response: the merchant's `redirectUrl` is returned HERE,
+        // not on the later 3DS-challenge poll snapshot, so without this seed
+        // the challenge presenter would receive `nil` and its host-match
+        // dismissal could never fire (see `drainEvents`' `initialSession`).
+        return try await drainEvents(
+            stream: sessionEventConsumer.observe(sessionToken: sessionToken),
+            initialSession: patched
+        )
     }
 
     // Inherent complexity: the function is the single drainer for every
@@ -201,38 +208,64 @@ public final class CardPaymentCoordinator: Sendable {
     // each with three sub-outcomes. Splitting it would scatter the presentation
     // re-entry guards across helpers and obscure the linear event flow.
     // swiftlint:disable:next cyclomatic_complexity
-    private func drainEvents(stream: AsyncThrowingStream<ChannelEvent, Error>) async throws -> CardPaymentResult {
-        // Full-window presentation guard: while a challenge is being shown we
-        // must reject ALL subsequent .threeDSChallengeReady events, not just
-        // ones that match the in-flight URL. Backends sometimes emit slightly
-        // different ACS URLs (cache-busting query params, re-issued nonces)
-        // for the same logical challenge — the old per-URL slot let those
-        // through and re-presented the WebView mid-challenge.
-        var isPresenting = false
-        var lastSession: SessionResponse?
-        for try await event in stream {
+    private func drainEvents(
+        stream: AsyncThrowingStream<ChannelEvent, Error>,
+        initialSession: SessionResponse? = nil
+    ) async throws -> CardPaymentResult {
+        // PXP-5009: a frictionless hosted 3DS page (pay.mollie.nl/payment/
+        // prepare-authentication/…) completes the payment server-side
+        // without ever navigating to the return URL or firing the
+        // `mollie-interceptor` postMessage, so `present`/`presentRedirect`
+        // never resolve on their own — even after the poller has already
+        // observed the terminal `.sessionCompleted`/`.sessionFailed`. A plain
+        // `for try await` loop would stay parked on the presenter await and
+        // never see those events.
+        //
+        // We therefore never hand the raw stream's iterator itself to a
+        // task-group race: cancelling a task suspended inside
+        // `AsyncThrowingStream.AsyncIterator.next()` terminates the stream's
+        // shared underlying storage for EVERY consumer, including copies
+        // that were never themselves cancelled (verified empirically — see
+        // decisions-log "PXP-5009 — AsyncThrowingStream cancellation poisons
+        // shared storage"). Racing the raw iterator directly would therefore
+        // permanently kill the poll stream the first time a challenge
+        // presentation won the race, breaking the very next `.next()` call
+        // the outer loop makes. Instead, a single, never-cancelled `pump`
+        // task owns the raw iterator for the whole lifetime of this
+        // function and forwards events into `EventQueue`, a small
+        // cancellation-safe relay: cancelling a waiter on the queue only
+        // resolves that one wait, never the queue itself, so
+        // `raceChallengePresentation` can freely cancel the losing side of
+        // its race without endangering subsequent consumption.
+        let queue = EventQueue()
+        let pump = Task {
+            var rawIterator = stream.makeAsyncIterator()
+            do {
+                while let event = try await rawIterator.next() {
+                    queue.push(event)
+                }
+                queue.finish()
+            } catch {
+                queue.finish(.failure(error))
+            }
+        }
+        defer { pump.cancel() }
+
+        // `lastSession` tracks the latest observed snapshot. `merchantReturnURL`
+        // is the STICKY merchant `redirectUrl`: once any session reports one
+        // (seeded here from the legacy PATCH response) it is retained even if a
+        // later snapshot — e.g. the minimal 3DS-challenge poll — omits it, so
+        // the challenge/redirect presenter always receives the return URL its
+        // host-match dismissal needs.
+        var lastSession: SessionResponse? = initialSession
+        var merchantReturnURL: URL? = initialSession?.redirectUrl.flatMap(URL.init(string:))
+        while let event = try await queue.next() {
             switch event {
             case let .sessionCompleted(session):
-                onSessionUpdate?(session)
-                return .completed(session)
+                return handleSessionCompleted(session)
             case let .sessionFailed(details):
-                // ChannelEvent.sessionFailed carries ProblemDetails, not a
-                // SessionResponse. We surface the last observed session (if any)
-                // so consumers wired to onSessionUpdate see the most recent state
-                // before the failure result is returned. Reachable from the
-                // checkout-attempt error path (synthesized ProblemDetails).
-                if let lastSession {
-                    onSessionUpdate?(lastSession)
-                }
-                return .failed(.sessionFailed(details))
+                return handleSessionFailed(details, lastSession: lastSession)
             case let .threeDSChallengeReady(url):
-                // Drop ALL re-emissions while a challenge is on screen — the
-                // ACS page can take ~10s to resolve and the poller will keep
-                // yielding fresh nextAction snapshots throughout.
-                if isPresenting {
-                    continue
-                }
-                isPresenting = true
                 // Thread the session's `redirectUrl` (when known) into the
                 // challenge presenter so the WebView's navigation policy
                 // recognises the ACS bouncing back to the merchant's
@@ -241,26 +274,24 @@ public final class CardPaymentCoordinator: Sendable {
                 // `https://example.com/return`). Pre-poll cases where we
                 // have no session yet pass `nil`; the presenter falls back
                 // to its existing behaviour.
-                let challengeReturnURL = lastSession?.redirectUrl.flatMap(URL.init(string:))
-                let result = await challengePresenter.present(
-                    challengeURL: url,
-                    returnURL: challengeReturnURL,
-                    in: challengeContainer
-                )
-                isPresenting = false
-                // After the long-await, the parent task may have been cancelled
-                // (host backed out, sheet dismissed). Surface cancellation
-                // before continuing the loop so callers don't see a phantom
-                // completion arrive after dismissal.
-                try Task.checkCancellation()
-                switch result {
-                case .authenticated:
-                    continue
-                case let .failed(reason):
-                    return .failed(.threeDSFailed(reason: reason))
-                case .cancelled:
-                    await sendCancelAuthentication()
-                    return .cancelled
+                let challengeReturnURL = merchantReturnURL
+                let sessionBox = SessionBox(lastSession)
+                let outcome = try await raceChallengePresentation(
+                    queue: queue,
+                    sessionBox: sessionBox
+                ) { [challengePresenter, challengeContainer] in
+                    await challengePresenter.present(
+                        challengeURL: url,
+                        returnURL: challengeReturnURL,
+                        in: challengeContainer
+                    )
+                }
+                lastSession = sessionBox.get()
+                if let refreshed = lastSession?.redirectUrl.flatMap(URL.init(string:)) {
+                    merchantReturnURL = refreshed
+                }
+                if let result = try await handleChallengeRaceOutcome(outcome, lastSession: lastSession) {
+                    return result
                 }
             case let .redirectRequired(url):
                 // Server emitted actionType=redirect with a Mollie hosted page
@@ -270,28 +301,24 @@ public final class CardPaymentCoordinator: Sendable {
                 // success — the polling stream stays open and only a
                 // subsequent `.sessionCompleted` from status=completed yields
                 // a successful CardPaymentResult.
-                if isPresenting {
-                    continue
+                let returnURL = merchantReturnURL
+                let sessionBox = SessionBox(lastSession)
+                let outcome = try await raceChallengePresentation(
+                    queue: queue,
+                    sessionBox: sessionBox
+                ) { [challengePresenter, challengeContainer] in
+                    await challengePresenter.presentRedirect(
+                        url: url,
+                        returnURL: returnURL,
+                        in: challengeContainer
+                    )
                 }
-                isPresenting = true
-                let returnURL = lastSession?.redirectUrl.flatMap(URL.init(string:))
-                let result = await challengePresenter.presentRedirect(
-                    url: url,
-                    returnURL: returnURL,
-                    in: challengeContainer
-                )
-                isPresenting = false
-                try Task.checkCancellation()
-                switch result {
-                case .authenticated:
-                    // "Presentation finished" — keep draining the stream so
-                    // the next poll determines paid/failed.
-                    continue
-                case let .failed(reason):
-                    return .failed(.threeDSFailed(reason: reason))
-                case .cancelled:
-                    await sendCancelAuthentication()
-                    return .cancelled
+                lastSession = sessionBox.get()
+                if let refreshed = lastSession?.redirectUrl.flatMap(URL.init(string:)) {
+                    merchantReturnURL = refreshed
+                }
+                if let result = try await handleChallengeRaceOutcome(outcome, lastSession: lastSession) {
+                    return result
                 }
             case let .sessionUpdated(session):
                 // No emit here — `.checkoutAttemptStateChanged` is already
@@ -299,6 +326,9 @@ public final class CardPaymentCoordinator: Sendable {
                 // the CAT branch; the legacy branch has no per-attempt event
                 // by design.
                 lastSession = session
+                if let redirect = session.redirectUrl.flatMap(URL.init(string:)) {
+                    merchantReturnURL = redirect
+                }
                 onSessionUpdate?(session)
                 continue
             }
@@ -311,6 +341,268 @@ public final class CardPaymentCoordinator: Sendable {
         // otherwise subsequent submits will be rejected by the server.
         await sendCancelAuthentication()
         return .failed(.timeout(operation: "card-payment"))
+    }
+
+    private func handleSessionCompleted(_ session: SessionResponse) -> CardPaymentResult {
+        onSessionUpdate?(session)
+        return .completed(session)
+    }
+
+    private func handleSessionFailed(_ details: ProblemDetails?, lastSession: SessionResponse?) -> CardPaymentResult {
+        // ChannelEvent.sessionFailed carries ProblemDetails, not a
+        // SessionResponse. We surface the last observed session (if any)
+        // so consumers wired to onSessionUpdate see the most recent state
+        // before the failure result is returned. Reachable from the
+        // checkout-attempt error path (synthesized ProblemDetails).
+        if let lastSession {
+            onSessionUpdate?(lastSession)
+        }
+        return .failed(.sessionFailed(details))
+    }
+
+    /// Lock-guarded holder for the session snapshot the draining child of
+    /// `raceChallengePresentation` observes via `.sessionUpdated` while the
+    /// race is in flight. `CardPaymentCoordinator` is a plain `Sendable`
+    /// class with only `let` properties, and `drainEvents`' `lastSession` is
+    /// a local `var` — it cannot be captured mutably by the `@Sendable`
+    /// task-group child closure, so the update is threaded through this box
+    /// instead and read back by the caller once the race concludes.
+    private final class SessionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: SessionResponse?
+
+        init(_ value: SessionResponse?) {
+            self.value = value
+        }
+
+        func get() -> SessionResponse? {
+            lock.withLock { value }
+        }
+
+        func set(_ newValue: SessionResponse) {
+            lock.withLock { value = newValue }
+        }
+    }
+
+    /// Cancellation-safe single-consumer relay sitting between the raw poll
+    /// stream and everything in `drainEvents` that needs to observe it.
+    ///
+    /// `AsyncThrowingStream.AsyncIterator` terminates its entire shared
+    /// storage when a task suspended inside `.next()` is cancelled — even
+    /// for iterator copies that were never themselves cancelled (verified
+    /// empirically; see decisions-log "PXP-5009 — AsyncThrowingStream
+    /// cancellation poisons shared storage"). `raceChallengePresentation`
+    /// needs to cancel the losing side of its race, so racing the raw
+    /// iterator directly would permanently kill the poll stream the first
+    /// time a presentation won. `EventQueue` decouples "pull from the raw
+    /// stream" (done exactly once, by the never-cancelled pump task in
+    /// `drainEvents`) from "wait for the next event" (what actually gets
+    /// raced): cancelling a `next()` waiter resolves only that one call —
+    /// the queue's buffer and finished state are untouched, so a fresh call
+    /// afterwards still observes every subsequent push.
+    private final class EventQueue: @unchecked Sendable {
+        private let lock = NSLock()
+        private var buffered: [ChannelEvent] = []
+        private var finishedWith: Result<Void, Error>?
+        private var waiter: CheckedContinuation<ChannelEvent?, Error>?
+        private var cancelledBeforeWaiterStored = false
+
+        func push(_ event: ChannelEvent) {
+            lock.lock()
+            guard let waiter else {
+                buffered.append(event)
+                lock.unlock()
+                return
+            }
+            self.waiter = nil
+            lock.unlock()
+            waiter.resume(returning: event)
+        }
+
+        func finish(_ result: Result<Void, Error> = .success(())) {
+            lock.lock()
+            finishedWith = result
+            guard let waiter else {
+                lock.unlock()
+                return
+            }
+            self.waiter = nil
+            lock.unlock()
+            switch result {
+            case .success:
+                waiter.resume(returning: nil)
+            case let .failure(error):
+                waiter.resume(throwing: error)
+            }
+        }
+
+        /// Waits for the next event. Safe to cancel: cancellation resolves
+        /// only THIS call (with `CancellationError`) and never marks the
+        /// queue itself finished.
+        func next() async throws -> ChannelEvent? {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ChannelEvent?, Error>) in
+                    lock.lock()
+                    if cancelledBeforeWaiterStored {
+                        cancelledBeforeWaiterStored = false
+                        lock.unlock()
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    if !buffered.isEmpty {
+                        let event = buffered.removeFirst()
+                        lock.unlock()
+                        continuation.resume(returning: event)
+                        return
+                    }
+                    if let finishedWith {
+                        lock.unlock()
+                        switch finishedWith {
+                        case .success:
+                            continuation.resume(returning: nil)
+                        case let .failure(error):
+                            continuation.resume(throwing: error)
+                        }
+                        return
+                    }
+                    waiter = continuation
+                    lock.unlock()
+                }
+            } onCancel: {
+                lock.lock()
+                guard let pending = waiter else {
+                    // Task was already cancelled before the continuation was
+                    // stored — flag it so the operation closure above
+                    // resumes immediately once it runs instead of parking a
+                    // waiter that will never be woken.
+                    cancelledBeforeWaiterStored = true
+                    lock.unlock()
+                    return
+                }
+                waiter = nil
+                lock.unlock()
+                pending.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    /// Outcome of racing a challenge/redirect presentation against continued
+    /// poll-stream draining. Carries only `Sendable` payloads extracted from
+    /// `ChannelEvent` (which is itself not `Sendable`) so it can cross the
+    /// `withThrowingTaskGroup` boundary as the child tasks' result type.
+    private enum ChallengeRaceOutcome {
+        case presented(ThreeDSResult)
+        case sessionCompleted(SessionResponse)
+        case sessionFailed(ProblemDetails?)
+        case streamEnded
+    }
+
+    /// Races a challenge/redirect presentation against continued poll-stream
+    /// draining (PXP-5009), both reading from the shared `EventQueue` so
+    /// cancelling the losing side never disturbs the underlying poll stream
+    /// (see `EventQueue`'s doc comment for why the raw stream iterator
+    /// cannot be raced directly).
+    ///
+    /// Whichever finishes first wins:
+    ///  - the presenter resolves on its own (normal path) — the drain child
+    ///    is cancelled; its in-flight `queue.next()` wait resolves with
+    ///    `CancellationError` immediately and the queue is left intact for
+    ///    the outer loop's next call.
+    ///  - a terminal poll event (or stream exhaustion) arrives first — the
+    ///    presenter is still stranded (frictionless hosted 3DS never
+    ///    resolves it), so we force it down via `dismiss()` before returning;
+    ///    cancelling alone would not resolve its checked continuation.
+    private func raceChallengePresentation( // swiftlint:disable:this cyclomatic_complexity
+        queue: EventQueue,
+        sessionBox: SessionBox,
+        presentation: @escaping @Sendable () async -> ThreeDSResult
+    ) async throws -> ChallengeRaceOutcome {
+        try await withThrowingTaskGroup(of: ChallengeRaceOutcome.self) { group in
+            group.addTask {
+                await .presented(presentation())
+            }
+            group.addTask { [onSessionUpdate] in
+                while let event = try await queue.next() {
+                    switch event {
+                    case let .sessionCompleted(session):
+                        return .sessionCompleted(session)
+                    case let .sessionFailed(details):
+                        return .sessionFailed(details)
+                    case let .sessionUpdated(session):
+                        sessionBox.set(session)
+                        onSessionUpdate?(session)
+                    case .threeDSChallengeReady, .redirectRequired:
+                        // Full-window presentation guard: drop ALL
+                        // re-emissions while this presentation is in flight,
+                        // not just ones matching the in-flight URL —
+                        // backends keep emitting fresh nextAction snapshots
+                        // (cache-busting params, re-issued nonces) for the
+                        // same logical challenge throughout.
+                        continue
+                    }
+                }
+                return .streamEnded
+            }
+
+            guard let first = try await group.next() else {
+                group.cancelAll()
+                return .streamEnded
+            }
+            switch first {
+            case .presented:
+                group.cancelAll()
+            case .sessionCompleted, .sessionFailed, .streamEnded:
+                await self.challengePresenter.dismiss()
+                group.cancelAll()
+            }
+            // Drain the loser so this scope doesn't rethrow a spurious
+            // CancellationError from it on exit.
+            while true {
+                do {
+                    guard try await group.next() != nil else { break }
+                } catch {
+                    continue
+                }
+            }
+            return first
+        }
+    }
+
+    /// Maps a `raceChallengePresentation` outcome to either a terminal
+    /// `CardPaymentResult` (return it) or `nil` (keep draining the outer
+    /// loop).
+    private func handleChallengeRaceOutcome(
+        _ outcome: ChallengeRaceOutcome,
+        lastSession: SessionResponse?
+    ) async throws -> CardPaymentResult? {
+        switch outcome {
+        case let .presented(result):
+            // After the long-await, the parent task may have been cancelled
+            // (host backed out, sheet dismissed). Surface cancellation
+            // before continuing the loop so callers don't see a phantom
+            // completion arrive after dismissal.
+            try Task.checkCancellation()
+            switch result {
+            case .authenticated:
+                return nil
+            case let .failed(reason):
+                return .failed(.threeDSFailed(reason: reason))
+            case .cancelled:
+                await sendCancelAuthentication()
+                return .cancelled
+            }
+        case let .sessionCompleted(session):
+            return handleSessionCompleted(session)
+        case let .sessionFailed(details):
+            return handleSessionFailed(details, lastSession: lastSession)
+        case .streamEnded:
+            // The poll stream finished before the presenter resolved on its
+            // own; `dismiss()` already ran. Fall through to the outer loop,
+            // whose next `iterator.next()` call will also see the stream
+            // has ended and hit the "stream finished without terminal"
+            // handling at the bottom of `drainEvents`.
+            return nil
+        }
     }
 
     /// PATCH /sessions/{token}/cancel-authentication so the backend can leave

@@ -24,6 +24,10 @@ Each release section uses these headings, in this order, omitting any that do no
 
 - `LICENSE` copyright line corrected from project-template residue to `Copyright (c) 2026 Mollie B.V.`.
 
+### Security
+
+- SPKI certificate pinning on `MolliePaymentEndpoints.production`'s `URLSession` for `sessions.mollie.com` and `api.cc.mollie.com`, additive to system TLS trust. See [SECURITY.md](SECURITY.md#tls--spki-certificate-pinning) and the [rotation runbook](docs/security/tls-pin-rotation-runbook.md).
+
 ## [0.0.1] — Pre-GA
 
 Pre-1.0 development. The public API surface is not yet frozen — see [VERSIONING.md](docs/policies/VERSIONING.md) for the pre-1.0 caveat. Notable work shipped under this version range:

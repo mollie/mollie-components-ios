@@ -18,7 +18,35 @@ This document describes what the SDK does to protect typed card data, what it ca
 | Field wipe on dismount | Same wipe on `viewWillDisappear` | User navigates away mid-typing or post-result |
 | Snapshot value-type wipe | `CardFormSnapshot.zero()` after the host coordinator has consumed the snapshot | The producer-side reference inside the SDK |
 | `Tokenisation-Agent` header | Vendor-prefixed identifier on every `/v1/card-tokens` request | Server-side detection of unauthorized SDK usage |
-| Endpoint pinning | `MolliePaymentEndpoints.production` hard-codes Mollie's production tokeniser and Sessions Service hosts | Misrouted traffic if a merchant override misconfigures URLs |
+| TLS / SPKI certificate pinning | `MolliePaymentEndpoints.production`'s `URLSession` delegate additionally requires the Google Trust Services chain on `sessions.mollie.com` and `api.cc.mollie.com` | A network attacker (rogue CA, compromised device trust store) presenting a certificate from an unrelated issuer |
+
+## TLS / SPKI certificate pinning
+
+Both production API hosts — `sessions.mollie.com` and `api.cc.mollie.com` — sit
+behind an additional SPKI (Subject Public Key Info) pin check on top of normal
+TLS trust evaluation.
+
+**Additive, not a replacement.** A connection is accepted only if the platform's
+own trust evaluation (`SecTrustEvaluateWithError`) passes *and* the validated
+chain contains a pinned key. Pinning never rescues a chain the system has
+already rejected.
+
+**What's pinned.** The intermediate and both possible roots in the Google Trust
+Services chain that issues certificates for both hosts — not the leaf, which
+Google rotates roughly every 90 days. Pinning at this tier means routine leaf
+renewal needs no SDK update.
+
+**Hard fail, with a safety valve.** If a presented chain passes system trust but
+carries none of the pinned keys, the connection is cancelled and the request
+surfaces as `MollieError.network`. The pin set also carries an expiry date;
+after it passes, pinning silently degrades to system-trust-only so an
+unmaintained SDK version doesn't lose all connectivity over a missed rotation.
+See [`docs/security/tls-pin-rotation-runbook.md`](docs/security/tls-pin-rotation-runbook.md)
+for the rotation and expiry-checkpoint procedure.
+
+**Scope.** Only the two API-client hosts above are pinned. The 3D Secure
+challenge flow renders third-party issuer/ACS pages in a `WKWebView`; those
+hosts aren't Mollie-controlled and can't be pinned.
 
 ## What the SDK cannot enforce
 
@@ -28,6 +56,8 @@ The embedded form lives in your app's process and view hierarchy. iOS doesn't sa
 - Subclass / category-swizzle Mollie types via the Objective-C runtime.
 - Read process memory via `mach_vm_read` (requires entitlements not granted to App Store apps; relevant only for jailbroken devices or development builds with `get-task-allow`).
 - Inject a third-party keyboard extension that captures every keystroke (mitigated only by the user disabling third-party keyboards).
+
+TLS pinning is pinned at the CA (intermediate + root) tier, not the leaf, because both hosts use Google-managed certificates whose private keys Mollie does not hold. This defends against an unrelated CA issuing a rogue certificate for these hosts, but it does not defend against Google Trust Services itself mis-issuing a certificate for a Mollie host to a third party. That residual is accepted; own-key/leaf pinning would require migrating to self-managed certificates and is not planned.
 
 The SDK does not attempt to detect or block these vectors. They are out of scope for an in-process UI component.
 

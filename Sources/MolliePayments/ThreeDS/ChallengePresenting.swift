@@ -33,9 +33,28 @@ package protocol ChallengePresenting: Sendable {
     /// and only `status=completed` from a subsequent poll signals true
     /// payment success.
     func presentRedirect(url: URL, returnURL: URL?, in container: any ChallengeContainer) async -> ThreeDSResult
+
+    /// Force-dismiss an in-flight presentation and resolve it as `.cancelled`.
+    ///
+    /// PXP-5009: a frictionless-hosted 3DS page completes the payment
+    /// server-side without ever navigating to the return URL or firing the
+    /// `mollie-interceptor` postMessage, so `present`/`presentRedirect` never
+    /// resolves on its own even after the coordinator's poller has already
+    /// observed the terminal `.sessionCompleted`/`.sessionFailed`. The
+    /// coordinator races the presentation against continued poll-stream
+    /// draining; when a terminal poll event wins, it calls `dismiss()` here
+    /// to tear down the still-open WebView instead of leaving it stranded.
+    ///
+    /// Default is a no-op so existing test doubles that only implement
+    /// `present`/`presentRedirect` keep compiling; the real
+    /// `ThreeDSCoordinator` overrides it to actually dismiss its UI and
+    /// resolve the pending continuation.
+    func dismiss() async
 }
 
 package extension ChallengePresenting {
+    func dismiss() async {}
+
     /// Default `present(challengeURL:returnURL:in:)` falls back to the
     /// returnURL-free overload. Existing test mocks that only implement the
     /// older signature keep working — they just won't see the merchant

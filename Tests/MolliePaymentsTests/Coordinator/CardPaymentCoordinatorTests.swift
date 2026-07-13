@@ -594,382 +594,521 @@ import XCTest
                 return XCTFail("Expected .failed (no-advance cap or timeout), got \(result)")
             }
         }
-    }
 
-    // MARK: - Checkout-attempt path (useCheckoutAttempts: true)
+        // MARK: - PXP-5009: poll-vs-presentation race
 
-    func test_submit_checkoutAttemptPath_happyPath_returnsCompleted() async throws {
-        let mock = MockHTTPClient()
-        mock.enqueue(makeToken())
-        mock.enqueue(makeCATResponse())
-        let openMap = try makeAttemptMap(sessionJSON: openSessionJSON)
-        let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON)
-        mock.enqueue(openMap)
-        mock.enqueue(completedMap)
+        /// A frictionless hosted 3DS page completes the payment server-side
+        /// without ever navigating back to the return URL or firing the
+        /// `mollie-interceptor` postMessage, so `present` never resolves on
+        /// its own. Meanwhile the poller keeps draining in the background and
+        /// can observe `.sessionCompleted` while the presentation is still
+        /// stranded. `drainEvents` must notice the terminal poll event,
+        /// dismiss the stranded presenter, and return `.completed` instead of
+        /// hanging until the presenter's own watchdog fires.
+        func test_submit_3dsChallenge_pollCompletesBeforePresenterResolves_dismissesAndReturnsCompleted() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH /details
 
-        let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
-        let result = await coordinator.submit(makeCardData())
+            let challenge = try decodeSession(threeDSChallengeJSON)
+            let completed = try decodeSession(completedSessionJSON)
+            mock.enqueue(challenge)
+            mock.enqueue(completed)
 
-        guard case let .completed(session) = result else {
-            return XCTFail("Expected .completed, got \(result)")
-        }
-        XCTAssertEqual(session.sessionToken, "sess_abc123")
+            let presenter = NeverResolvingChallengePresenter()
+            let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter)
+            let result = await coordinator.submit(makeCardData())
 
-        // Request-shape assertions: catches the failure mode from the
-        // production "access denied" incident, where a wrong tokenizer
-        // path (v1/tokens vs v1/card-tokens) shipped without any test
-        // ever inspecting the URL. Sequence of perform(_:) calls on the
-        // happy CAT path:
-        //   [0] POST /v1/card-tokens (tokenizer)
-        //   [1] POST /client/v2/sessions/{token}/checkout-attempts
-        //   [2..] GET  /client/v2/sessions/{token}/checkout-attempts/  (poll loop)
-        let captured = mock.capturedRequests
-        XCTAssertGreaterThanOrEqual(captured.count, 3, "expected at least tokenize + POST + 1 poll")
-
-        // 1) Tokenizer POST — path and body shape verified end-to-end.
-        let tokenize = captured[0]
-        XCTAssertEqual(
-            tokenize.path,
-            "v1/card-tokens",
-            "tokenizer path drift would re-trigger the prod 'access denied' regression"
-        )
-        XCTAssertEqual(tokenize.method, .post)
-        let tokenizeBody = try XCTUnwrap(tokenize.body, "tokenizer call must carry a body")
-        let decodedTokenize = try JSONDecoder().decode(TokenizeRequest.self, from: tokenizeBody)
-        XCTAssertEqual(decodedTokenize.cardNumber, "4242424242424242")
-        XCTAssertEqual(decodedTokenize.cardCvv, "123")
-        XCTAssertEqual(decodedTokenize.cardHolder, "Jane Doe")
-        XCTAssertEqual(decodedTokenize.cardExpiryDate, "12/30")
-        XCTAssertEqual(decodedTokenize.profileToken, "pfl_test")
-        XCTAssertTrue(decodedTokenize.testmode)
-
-        // 2) POST /checkout-attempts — path and body shape verified.
-        // Trailing-slash vs no-slash matters: GET uses trailing slash,
-        // POST does NOT. Drift either way would 404 in production.
-        let createCAT = captured[1]
-        XCTAssertEqual(
-            createCAT.path,
-            "client/v2/sessions/sess_abc123/checkout-attempts",
-            "POST path must NOT have a trailing slash (GET does, POST does not — see SessionEndpoint)"
-        )
-        XCTAssertEqual(createCAT.method, .post)
-        let createCATBody = try XCTUnwrap(createCAT.body, "POST /checkout-attempts must carry a body")
-        let decodedCreateCAT = try JSONDecoder().decode(CreateCheckoutAttemptRequest.self, from: createCATBody)
-        XCTAssertEqual(decodedCreateCAT.paymentMethod, "creditcard")
-        XCTAssertEqual(decodedCreateCAT.checkoutMethod, "card")
-        XCTAssertEqual(decodedCreateCAT.pspToken, "tok_abc", "pspToken must be the value returned by the tokenizer")
-        XCTAssertNil(decodedCreateCAT.wallet, "wallet must be absent on a plain credit-card attempt")
-        XCTAssertNil(decodedCreateCAT.walletToken)
-    }
-
-    func test_submit_checkoutAttemptPath_factoryProducesWebSDKContractBody() throws {
-        // Verify CreateCheckoutAttemptRequestFactory produces the fields required by the
-        // web SDK's checkout-attempt payload contract: paymentMethod="creditcard",
-        // checkoutMethod="card", pspToken present, no extra keys for wallet/walletToken.
-        let fingerprint = DeviceFingerprint(
-            language: "en-US", javascriptEnabled: false, screenWidth: "375",
-            screenHeight: "812", timeZoneOffset: "0", javaEnabled: false, colorDepth: "24"
-        )
-        let request = CreateCheckoutAttemptRequestFactory.creditCard(
-            pspToken: "tok_verify",
-            fingerprint: fingerprint
-        )
-        let encoded = try JSONEncoder().encode(request)
-        let decoded = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
-
-        XCTAssertEqual(decoded?["paymentMethod"] as? String, "creditcard")
-        XCTAssertEqual(decoded?["checkoutMethod"] as? String, "card")
-        XCTAssertEqual(decoded?["pspToken"] as? String, "tok_verify")
-        XCTAssertNotNil(decoded?["fingerprint"])
-    }
-
-    func test_submit_checkoutAttemptPath_postReturns422_surfacesFailedWithProblemDetails() async throws {
-        // POST /checkout-attempts returns 422 with a validation payload. The
-        // coordinator must surface .failed(.api(.validationFailed)) — not the
-        // pre-fix .invalidConfiguration mis-classification.
-        let mock = MockHTTPClient()
-        mock.enqueue(makeToken())
-        let violation = try JSONDecoder().decode(
-            Violation.self,
-            from: Data(#"{"name":"pspToken","reason":"required"}"#.utf8)
-        )
-        mock.enqueue(error: MollieError.api(.validationFailed([violation])))
-
-        let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
-        let result = await coordinator.submit(makeCardData())
-
-        guard case let .failed(error) = result else {
-            return XCTFail("Expected .failed, got \(result)")
-        }
-        guard case let .api(.validationFailed(violations)) = error else {
-            return XCTFail("Expected .api(.validationFailed), got \(error)")
-        }
-        XCTAssertEqual(violations.first?.name, "pspToken")
-    }
-
-    func test_submit_checkoutAttemptPath_dropsChallengeReEmissionsWhilePresenting() async throws {
-        // Regression for the isPresenting full-window guard. Previously the
-        // coordinator deduped on a per-URL slot; if the backend issued a
-        // slightly-different ACS URL while the WebView was still mounted
-        // (e.g. cache-busting query, re-issued nonce), the presenter would
-        // be invoked again mid-challenge. The guard now blocks ALL
-        // re-emissions until the in-flight present(...) resolves.
-        //
-        // We approximate the "concurrent re-emission" by enqueuing two
-        // distinct challenge URLs back-to-back (different eventId so the
-        // poller doesn't dedupe them out) followed by completed. With the
-        // guard, the second challenge is suppressed and presenter count = 1.
-        let challengeJSON1 = """
-        {
-            "session_token": "sess_abc123",
-            "status": "open",
-            "next_action": {
-                "action_type": "threeDsChallenge",
-                "event_id": 1,
-                "params": { "challenge_url": "https://3ds.example.com/acs?v=1" }
-            },
-            "payment_amount": { "amount": "10.00", "currency": "EUR" }
-        }
-        """
-        let challengeJSON2 = """
-        {
-            "session_token": "sess_abc123",
-            "status": "open",
-            "next_action": {
-                "action_type": "threeDsChallenge",
-                "event_id": 2,
-                "params": { "challenge_url": "https://3ds.example.com/acs?v=2" }
-            },
-            "payment_amount": { "amount": "10.00", "currency": "EUR" }
-        }
-        """
-        let mock = MockHTTPClient()
-        mock.enqueue(makeToken())
-        mock.enqueue(makeCATResponse())
-        try mock.enqueue(makeAttemptMap(sessionJSON: challengeJSON1))
-        try mock.enqueue(makeAttemptMap(sessionJSON: challengeJSON2))
-        try mock.enqueue(makeAttemptMap(sessionJSON: completedSessionJSON))
-
-        let presenter = SlowChallengePresenter(result: .authenticated, delayMs: 80)
-        let coordinator = makeCoordinator(
-            mock: mock,
-            challengePresenter: presenter,
-            intervals: [0.005],
-            totalBudget: 5.0,
-            useCheckoutAttempts: true
-        )
-        let result = await coordinator.submit(makeCardData())
-
-        guard case .completed = result else {
-            return XCTFail("Expected .completed, got \(result)")
-        }
-        let callCount = await presenter.callCount
-        XCTAssertEqual(callCount, 1, "Presenter must not re-fire while a challenge is on screen")
-    }
-
-    func test_submit_checkoutAttemptPath_3dsAuthenticated_continuesAndCompletes() async throws {
-        let mock = MockHTTPClient()
-        mock.enqueue(makeToken())
-        mock.enqueue(makeCATResponse())
-        let challengeMap = try makeAttemptMap(sessionJSON: threeDSChallengeJSON)
-        let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON)
-        mock.enqueue(challengeMap)
-        mock.enqueue(completedMap)
-
-        let presenter = StubChallengePresenter(result: .authenticated)
-        let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter, useCheckoutAttempts: true)
-        let result = await coordinator.submit(makeCardData())
-
-        guard case .completed = result else {
-            return XCTFail("Expected .completed, got \(result)")
-        }
-        let callCount = await presenter.callCount
-        XCTAssertEqual(callCount, 1)
-    }
-
-    func test_submit_checkoutAttemptPath_3dsCancelled_invokesCancelAuthentication() async throws {
-        // Regression guard: on the CAT path, a .cancelled 3DS result must
-        // tear down the in-flight authentication via PATCH /cancel-authentication
-        // before returning. Without it, the next POST /checkout-attempts on the
-        // same session is rejected as "authentication still pending".
-        let mock = MockHTTPClient()
-        mock.enqueue(makeToken())
-        mock.enqueue(makeCATResponse())
-        let challengeMap = try makeAttemptMap(sessionJSON: threeDSChallengeJSON)
-        mock.enqueue(challengeMap)
-        // PATCH /cancel-authentication response — backend returns the
-        // session in its post-cancel state. We don't decode meaningfully,
-        // any SessionResponse will do.
-        let open = try decodeSession(openSessionJSON)
-        mock.enqueue(open)
-
-        let presenter = StubChallengePresenter(result: .cancelled)
-        let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter, useCheckoutAttempts: true)
-        let result = await coordinator.submit(makeCardData())
-
-        guard case .cancelled = result else {
-            return XCTFail("Expected .cancelled, got \(result)")
-        }
-        // tokenize + POST checkout-attempts + poll + PATCH cancel-authentication.
-        XCTAssertEqual(mock.callCount, 4, "cancel-authentication must be invoked exactly once on .cancelled")
-    }
-
-    func test_submit_checkoutAttemptPath_timeout_returnsFailed() async throws {
-        let mock = MockHTTPClient()
-        mock.enqueue(makeToken())
-        mock.enqueue(makeCATResponse())
-        let openMap = try makeAttemptMap(sessionJSON: openSessionJSON)
-        mock.enqueueRepeating(openMap)
-
-        let coordinator = makeCoordinator(
-            mock: mock,
-            intervals: [0.01, 0.01, 0.01],
-            totalBudget: 0.05,
-            useCheckoutAttempts: true
-        )
-        let result = await coordinator.submit(makeCardData())
-
-        guard case let .failed(error) = result else {
-            return XCTFail("Expected .failed, got \(result)")
-        }
-        guard case let .timeout(operation) = error else {
-            return XCTFail("Expected .timeout, got \(error)")
-        }
-        XCTAssertEqual(operation, "checkout-attempt-polling")
-    }
-
-    // MARK: - debug emit-sites
-
-    func test_submit_checkoutAttemptPath_catTokenFlowsToGetPath() async throws {
-        // Verify the checkoutAttemptToken from POST response is used to look up the map entry.
-        // If the token mismatches, the map lookup fails and polling continues — no .completed.
-        let mock = MockHTTPClient()
-        mock.enqueue(makeToken())
-        mock.enqueue(makeCATResponse(token: "cat_specific"))
-        // Map keyed by "cat_specific" → coordinator must look up this key.
-        let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON, catToken: "cat_specific")
-        mock.enqueue(completedMap)
-
-        let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
-        let result = await coordinator.submit(makeCardData())
-
-        guard case .completed = result else {
-            return XCTFail("Expected .completed when cat_token matches map key, got \(result)")
-        }
-    }
-
-    // MARK: - Test doubles
-
-    private final class StubChallengePresenter: ChallengePresenting, @unchecked Sendable {
-        private let result: ThreeDSResult
-        private let lock = NSLock()
-        private var _callCount = 0
-
-        var callCount: Int {
-            get async { lock.withLock { _callCount } }
-        }
-
-        init(result: ThreeDSResult) {
-            self.result = result
-        }
-
-        func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
-            lock.withLock { _callCount += 1 }
-            return result
-        }
-    }
-
-    private final class NeverCalledChallengePresenter: ChallengePresenting, @unchecked Sendable {
-        func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
-            XCTFail("ChallengePresenter should not be called in this test")
-            return .cancelled
-        }
-    }
-
-    /// Records the `returnURL` the coordinator threads into the challenge
-    /// presenter. Used to pin the regression: the challenge-path call site
-    /// MUST forward `lastSession?.redirectUrl` so the WebView's host-match
-    /// dismisses on the merchant-return bounce instead of stranding the
-    /// user on the merchant page.
-    private final class RecordingChallengePresenter: ChallengePresenting, @unchecked Sendable {
-        private let result: ThreeDSResult
-        private let lock = NSLock()
-        private var _capturedReturnURL: URL?
-        private var _captured = false
-
-        var capturedReturnURL: URL? {
-            get async { lock.withLock { _capturedReturnURL } }
-        }
-
-        var didCapture: Bool {
-            get async { lock.withLock { _captured } }
-        }
-
-        init(result: ThreeDSResult) {
-            self.result = result
-        }
-
-        /// Default-impl overload would forward to the returnURL-free variant
-        /// and drop the URL. Implementing the explicit overload is what makes
-        /// the recording observable.
-        func present(
-            challengeURL _: URL,
-            returnURL: URL?,
-            in _: any ChallengeContainer
-        ) async -> ThreeDSResult {
-            lock.withLock {
-                _capturedReturnURL = returnURL
-                _captured = true
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
             }
-            return result
+            let dismissCount = await presenter.dismissCallCount
+            XCTAssertEqual(
+                dismissCount,
+                1,
+                "Stranded presentation must be dismissed exactly once when the poller wins the race"
+            )
         }
 
-        /// Required by the protocol but not exercised on the challenge path.
-        /// Kept as a no-op pass-through for completeness.
-        func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
-            result
+        /// Same race as above, but the poller observes a hard failure
+        /// (actionType=error) instead of completion while the presenter is
+        /// still stranded. Must dismiss and surface `.sessionFailed` rather
+        /// than hanging.
+        func test_submit_3dsChallenge_pollFailsBeforePresenterResolves_dismissesAndReturnsFailed() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH /details
+
+            let challenge = try decodeSession(threeDSChallengeJSON)
+            mock.enqueue(challenge)
+            let failed = try decodeSession("""
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": {
+                    "action_type": "error",
+                    "params": { "title": "expired", "detail": "Session expired" }
+                },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """)
+            mock.enqueue(failed)
+
+            let presenter = NeverResolvingChallengePresenter()
+            let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case let .failed(error) = result else {
+                return XCTFail("Expected .failed, got \(result)")
+            }
+            guard case let .sessionFailed(details) = error else {
+                return XCTFail("Expected .sessionFailed, got \(error)")
+            }
+            XCTAssertEqual(details?.detail, "Session expired")
+            let dismissCount = await presenter.dismissCallCount
+            XCTAssertEqual(
+                dismissCount,
+                1,
+                "Stranded presentation must be dismissed exactly once when the poller wins the race"
+            )
         }
-    }
 
-    /// Test-only presenter that simulates the latency of a live ACS page,
-    /// giving the poller time to emit additional `.threeDSChallengeReady`
-    /// events while `present(...)` is suspended.
-    private final class SlowChallengePresenter: ChallengePresenting, @unchecked Sendable {
-        private let result: ThreeDSResult
-        private let delayMs: UInt64
-        private let lock = NSLock()
-        private var _callCount = 0
+        // MARK: - Checkout-attempt path (useCheckoutAttempts: true)
 
-        var callCount: Int {
-            get async { lock.withLock { _callCount } }
+        func test_submit_checkoutAttemptPath_happyPath_returnsCompleted() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse())
+            let openMap = try makeAttemptMap(sessionJSON: openSessionJSON)
+            let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON)
+            mock.enqueue(openMap)
+            mock.enqueue(completedMap)
+
+            let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case let .completed(session) = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+            XCTAssertEqual(session.sessionToken, "sess_abc123")
+
+            // Request-shape assertions: catches the failure mode from the
+            // production "access denied" incident, where a wrong tokenizer
+            // path (v1/tokens vs v1/card-tokens) shipped without any test
+            // ever inspecting the URL. Sequence of perform(_:) calls on the
+            // happy CAT path:
+            //   [0] POST /v1/card-tokens (tokenizer)
+            //   [1] POST /client/v2/sessions/{token}/checkout-attempts
+            //   [2..] GET  /client/v2/sessions/{token}/checkout-attempts/  (poll loop)
+            let captured = mock.capturedRequests
+            XCTAssertGreaterThanOrEqual(captured.count, 3, "expected at least tokenize + POST + 1 poll")
+
+            // 1) Tokenizer POST — path and body shape verified end-to-end.
+            let tokenize = captured[0]
+            XCTAssertEqual(
+                tokenize.path,
+                "v1/card-tokens",
+                "tokenizer path drift would re-trigger the prod 'access denied' regression"
+            )
+            XCTAssertEqual(tokenize.method, .post)
+            let tokenizeBody = try XCTUnwrap(tokenize.body, "tokenizer call must carry a body")
+            // TokenizeRequest is deliberately Encodable-only (it carries raw PAN/CVV
+            // and must never round-trip back out of JSON — see its
+            // CustomDebugStringConvertible redaction note), so the wire shape is
+            // inspected via JSONSerialization instead of decoding back into the type.
+            let decodedTokenize = try XCTUnwrap(JSONSerialization.jsonObject(with: tokenizeBody) as? [String: Any])
+            XCTAssertEqual(decodedTokenize["cardNumber"] as? String, "4242424242424242")
+            XCTAssertEqual(decodedTokenize["cardCvv"] as? String, "123")
+            XCTAssertEqual(decodedTokenize["cardHolder"] as? String, "Jane Doe")
+            XCTAssertEqual(decodedTokenize["cardExpiryDate"] as? String, "12/30")
+            XCTAssertEqual(decodedTokenize["profileToken"] as? String, "pfl_test")
+            XCTAssertEqual(decodedTokenize["testmode"] as? Bool, true)
+
+            // 2) POST /checkout-attempts — path and body shape verified.
+            // Trailing-slash vs no-slash matters: GET uses trailing slash,
+            // POST does NOT. Drift either way would 404 in production.
+            let createCAT = captured[1]
+            XCTAssertEqual(
+                createCAT.path,
+                "client/v2/sessions/sess_abc123/checkout-attempts",
+                "POST path must NOT have a trailing slash (GET does, POST does not — see SessionEndpoint)"
+            )
+            XCTAssertEqual(createCAT.method, .post)
+            let createCATBody = try XCTUnwrap(createCAT.body, "POST /checkout-attempts must carry a body")
+            // CreateCheckoutAttemptRequest is likewise Encodable-only, so the wire
+            // shape is inspected via JSONSerialization instead of decoding back
+            // into the type (see the tokenizer assertion above for the same pattern).
+            let decodedCreateCAT = try XCTUnwrap(JSONSerialization.jsonObject(with: createCATBody) as? [String: Any])
+            XCTAssertEqual(decodedCreateCAT["paymentMethod"] as? String, "creditcard")
+            XCTAssertEqual(decodedCreateCAT["checkoutMethod"] as? String, "card")
+            XCTAssertEqual(
+                decodedCreateCAT["pspToken"] as? String,
+                "tok_abc",
+                "pspToken must be the value returned by the tokenizer"
+            )
+            XCTAssertNil(decodedCreateCAT["wallet"], "wallet must be absent on a plain credit-card attempt")
+            XCTAssertNil(decodedCreateCAT["walletToken"])
         }
 
-        init(result: ThreeDSResult, delayMs: UInt64) {
-            self.result = result
-            self.delayMs = delayMs
+        func test_submit_checkoutAttemptPath_factoryProducesWebSDKContractBody() throws {
+            // Verify CreateCheckoutAttemptRequestFactory produces the fields required by the
+            // web SDK's checkout-attempt payload contract: paymentMethod="creditcard",
+            // checkoutMethod="card", pspToken present, no extra keys for wallet/walletToken.
+            let fingerprint = DeviceFingerprint(
+                language: "en-US", javascriptEnabled: false, screenWidth: "375",
+                screenHeight: "812", timeZoneOffset: "0", javaEnabled: false, colorDepth: "24"
+            )
+            let request = CreateCheckoutAttemptRequestFactory.creditCard(
+                pspToken: "tok_verify",
+                fingerprint: fingerprint
+            )
+            let encoded = try JSONEncoder().encode(request)
+            let decoded = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+
+            XCTAssertEqual(decoded?["paymentMethod"] as? String, "creditcard")
+            XCTAssertEqual(decoded?["checkoutMethod"] as? String, "card")
+            XCTAssertEqual(decoded?["pspToken"] as? String, "tok_verify")
+            XCTAssertNotNil(decoded?["fingerprint"])
         }
 
-        func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
-            lock.withLock { _callCount += 1 }
-            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
-            return result
+        func test_submit_checkoutAttemptPath_postReturns422_surfacesFailedWithProblemDetails() async throws {
+            // POST /checkout-attempts returns 422 with a validation payload. The
+            // coordinator must surface .failed(.api(.validationFailed)) — not the
+            // pre-fix .invalidConfiguration mis-classification.
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let violation = try JSONDecoder().decode(
+                Violation.self,
+                from: Data(#"{"name":"pspToken","reason":"required"}"#.utf8)
+            )
+            mock.enqueue(error: MollieError.api(.validationFailed([violation])))
+
+            let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case let .failed(error) = result else {
+                return XCTFail("Expected .failed, got \(result)")
+            }
+            guard case let .api(.validationFailed(violations)) = error else {
+                return XCTFail("Expected .api(.validationFailed), got \(error)")
+            }
+            XCTAssertEqual(violations.first?.name, "pspToken")
         }
-    }
 
-    /// UIKit-free stub container for tests that exercise the coordinator
-    /// branch without spinning up a real `UINavigationController`.
-    private final class StubChallengeContainer: ChallengeContainer, @unchecked Sendable {}
+        func test_submit_checkoutAttemptPath_dropsChallengeReEmissionsWhilePresenting() async throws {
+            // Regression for the isPresenting full-window guard. Previously the
+            // coordinator deduped on a per-URL slot; if the backend issued a
+            // slightly-different ACS URL while the WebView was still mounted
+            // (e.g. cache-busting query, re-issued nonce), the presenter would
+            // be invoked again mid-challenge. The guard now blocks ALL
+            // re-emissions until the in-flight present(...) resolves.
+            //
+            // We approximate the "concurrent re-emission" by enqueuing two
+            // distinct challenge URLs back-to-back (different eventId so the
+            // poller doesn't dedupe them out) followed by completed. With the
+            // guard, the second challenge is suppressed and presenter count = 1.
+            let challengeJSON1 = """
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": {
+                    "action_type": "threeDsChallenge",
+                    "event_id": 1,
+                    "params": { "challenge_url": "https://3ds.example.com/acs?v=1" }
+                },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """
+            let challengeJSON2 = """
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": {
+                    "action_type": "threeDsChallenge",
+                    "event_id": 2,
+                    "params": { "challenge_url": "https://3ds.example.com/acs?v=2" }
+                },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse())
+            try mock.enqueue(makeAttemptMap(sessionJSON: challengeJSON1))
+            try mock.enqueue(makeAttemptMap(sessionJSON: challengeJSON2))
+            try mock.enqueue(makeAttemptMap(sessionJSON: completedSessionJSON))
 
-    private final class UpdatesCollector: @unchecked Sendable {
-        private let lock = NSLock()
-        private var responses: [SessionResponse] = []
+            let presenter = SlowChallengePresenter(result: .authenticated, delayMs: 80)
+            let coordinator = makeCoordinator(
+                mock: mock,
+                challengePresenter: presenter,
+                intervals: [0.005],
+                totalBudget: 5.0,
+                useCheckoutAttempts: true
+            )
+            let result = await coordinator.submit(makeCardData())
 
-        func append(_ response: SessionResponse) {
-            lock.withLock { responses.append(response) }
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+            let callCount = await presenter.callCount
+            XCTAssertEqual(callCount, 1, "Presenter must not re-fire while a challenge is on screen")
         }
 
-        var snapshot: [SessionResponse] {
-            get async { lock.withLock { responses } }
+        func test_submit_checkoutAttemptPath_3dsAuthenticated_continuesAndCompletes() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse())
+            let challengeMap = try makeAttemptMap(sessionJSON: threeDSChallengeJSON)
+            let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON)
+            mock.enqueue(challengeMap)
+            mock.enqueue(completedMap)
+
+            let presenter = StubChallengePresenter(result: .authenticated)
+            let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter, useCheckoutAttempts: true)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+            let callCount = await presenter.callCount
+            XCTAssertEqual(callCount, 1)
+        }
+
+        func test_submit_checkoutAttemptPath_3dsCancelled_invokesCancelAuthentication() async throws {
+            // Regression guard: on the CAT path, a .cancelled 3DS result must
+            // tear down the in-flight authentication via PATCH /cancel-authentication
+            // before returning. Without it, the next POST /checkout-attempts on the
+            // same session is rejected as "authentication still pending".
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse())
+            let challengeMap = try makeAttemptMap(sessionJSON: threeDSChallengeJSON)
+            mock.enqueue(challengeMap)
+            // PATCH /cancel-authentication response — backend returns the
+            // session in its post-cancel state. We don't decode meaningfully,
+            // any SessionResponse will do.
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open)
+
+            let presenter = StubChallengePresenter(result: .cancelled)
+            let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter, useCheckoutAttempts: true)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .cancelled = result else {
+                return XCTFail("Expected .cancelled, got \(result)")
+            }
+            // tokenize + POST checkout-attempts + poll + PATCH cancel-authentication.
+            XCTAssertEqual(mock.callCount, 4, "cancel-authentication must be invoked exactly once on .cancelled")
+        }
+
+        func test_submit_checkoutAttemptPath_timeout_returnsFailed() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse())
+            let openMap = try makeAttemptMap(sessionJSON: openSessionJSON)
+            mock.enqueueRepeating(openMap)
+
+            let coordinator = makeCoordinator(
+                mock: mock,
+                intervals: [0.01, 0.01, 0.01],
+                totalBudget: 0.05,
+                useCheckoutAttempts: true
+            )
+            let result = await coordinator.submit(makeCardData())
+
+            guard case let .failed(error) = result else {
+                return XCTFail("Expected .failed, got \(result)")
+            }
+            guard case let .timeout(operation) = error else {
+                return XCTFail("Expected .timeout, got \(error)")
+            }
+            XCTAssertEqual(operation, "checkout-attempt-polling")
+        }
+
+        // MARK: - debug emit-sites
+
+        func test_submit_checkoutAttemptPath_catTokenFlowsToGetPath() async throws {
+            // Verify the checkoutAttemptToken from POST response is used to look up the map entry.
+            // If the token mismatches, the map lookup fails and polling continues — no .completed.
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse(token: "cat_specific"))
+            // Map keyed by "cat_specific" → coordinator must look up this key.
+            let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON, catToken: "cat_specific")
+            mock.enqueue(completedMap)
+
+            let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .completed = result else {
+                return XCTFail("Expected .completed when cat_token matches map key, got \(result)")
+            }
+        }
+
+        // MARK: - Test doubles
+
+        private final class StubChallengePresenter: ChallengePresenting, @unchecked Sendable {
+            private let result: ThreeDSResult
+            private let lock = NSLock()
+            private var _callCount = 0
+
+            var callCount: Int {
+                get async { lock.withLock { _callCount } }
+            }
+
+            init(result: ThreeDSResult) {
+                self.result = result
+            }
+
+            func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
+                lock.withLock { _callCount += 1 }
+                return result
+            }
+        }
+
+        private final class NeverCalledChallengePresenter: ChallengePresenting, @unchecked Sendable {
+            func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
+                XCTFail("ChallengePresenter should not be called in this test")
+                return .cancelled
+            }
+        }
+
+        /// Records the `returnURL` the coordinator threads into the challenge
+        /// presenter. Used to pin the regression: the challenge-path call site
+        /// MUST forward `lastSession?.redirectUrl` so the WebView's host-match
+        /// dismisses on the merchant-return bounce instead of stranding the
+        /// user on the merchant page.
+        private final class RecordingChallengePresenter: ChallengePresenting, @unchecked Sendable {
+            private let result: ThreeDSResult
+            private let lock = NSLock()
+            private var _capturedReturnURL: URL?
+            private var _captured = false
+
+            var capturedReturnURL: URL? {
+                get async { lock.withLock { _capturedReturnURL } }
+            }
+
+            var didCapture: Bool {
+                get async { lock.withLock { _captured } }
+            }
+
+            init(result: ThreeDSResult) {
+                self.result = result
+            }
+
+            /// Default-impl overload would forward to the returnURL-free variant
+            /// and drop the URL. Implementing the explicit overload is what makes
+            /// the recording observable.
+            func present(
+                challengeURL _: URL,
+                returnURL: URL?,
+                in _: any ChallengeContainer
+            ) async -> ThreeDSResult {
+                lock.withLock {
+                    _capturedReturnURL = returnURL
+                    _captured = true
+                }
+                return result
+            }
+
+            /// Required by the protocol but not exercised on the challenge path.
+            /// Kept as a no-op pass-through for completeness.
+            func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
+                result
+            }
+        }
+
+        /// Test-only presenter that simulates the latency of a live ACS page,
+        /// giving the poller time to emit additional `.threeDSChallengeReady`
+        /// events while `present(...)` is suspended.
+        private final class SlowChallengePresenter: ChallengePresenting, @unchecked Sendable {
+            private let result: ThreeDSResult
+            private let delayMs: UInt64
+            private let lock = NSLock()
+            private var _callCount = 0
+
+            var callCount: Int {
+                get async { lock.withLock { _callCount } }
+            }
+
+            init(result: ThreeDSResult, delayMs: UInt64) {
+                self.result = result
+                self.delayMs = delayMs
+            }
+
+            func present(challengeURL _: URL, in _: any ChallengeContainer) async -> ThreeDSResult {
+                lock.withLock { _callCount += 1 }
+                try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                return result
+            }
+        }
+
+        /// Test-only presenter whose `present`/`presentRedirect` never resolve on
+        /// their own — modelling a frictionless hosted 3DS page that completes
+        /// the payment server-side without ever navigating to the return URL or
+        /// firing the `mollie-interceptor` postMessage (PXP-5009). Only resolves
+        /// when `dismiss()` is called, mirroring how the real `ThreeDSCoordinator`
+        /// tears down a presentation the poller has already raced past.
+        private final class NeverResolvingChallengePresenter: ChallengePresenting, @unchecked Sendable {
+            private let lock = NSLock()
+            private var pending: CheckedContinuation<ThreeDSResult, Never>?
+            private var _dismissCallCount = 0
+
+            var dismissCallCount: Int {
+                get async { lock.withLock { _dismissCallCount } }
+            }
+
+            func present(challengeURL: URL, in container: any ChallengeContainer) async -> ThreeDSResult {
+                await present(challengeURL: challengeURL, returnURL: nil, in: container)
+            }
+
+            func present(
+                challengeURL _: URL,
+                returnURL _: URL?,
+                in _: any ChallengeContainer
+            ) async -> ThreeDSResult {
+                await withCheckedContinuation { (continuation: CheckedContinuation<ThreeDSResult, Never>) in
+                    lock.withLock { pending = continuation }
+                }
+            }
+
+            // swiftlint:disable opening_brace
+            func presentRedirect(url: URL, returnURL: URL?,
+                                 in container: any ChallengeContainer) async -> ThreeDSResult
+            {
+                // swiftlint:enable opening_brace
+                await present(challengeURL: url, returnURL: returnURL, in: container)
+            }
+
+            func dismiss() async {
+                let continuation: CheckedContinuation<ThreeDSResult, Never>? = lock.withLock {
+                    _dismissCallCount += 1
+                    let value = pending
+                    pending = nil
+                    return value
+                }
+                continuation?.resume(returning: .cancelled)
+            }
+        }
+
+        /// UIKit-free stub container for tests that exercise the coordinator
+        /// branch without spinning up a real `UINavigationController`.
+        private final class StubChallengeContainer: ChallengeContainer, @unchecked Sendable {}
+
+        private final class UpdatesCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var responses: [SessionResponse] = []
+
+            func append(_ response: SessionResponse) {
+                lock.withLock { responses.append(response) }
+            }
+
+            var snapshot: [SessionResponse] {
+                get async { lock.withLock { responses } }
+            }
         }
     }
 #endif

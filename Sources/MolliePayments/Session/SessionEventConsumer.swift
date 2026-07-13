@@ -12,9 +12,11 @@ import MollieCore
 ///    `SessionPoller.pollAttempt()`. The `checkoutAttemptToken` is baked into the poller at
 ///    construction time; no second arg here so we cannot drift from the poller's view.
 ///
-/// Note on V2 contract: `nextAction.params["challenge_url"]` (snake_case) carries the 3DS ACS URL.
-/// Dictionary keys are not subject to keyDecodingStrategy conversion, so the literal key must match
-/// the wire field name.
+/// Note on V2 contract: the 3DS ACS URL arrives under `nextAction.params.challengeUrl` (camelCase,
+/// PayProc path) or `params.acsURL` (3DS-v2 path); the dev-harness/mock uses `challenge_url`.
+/// Dictionary keys are NOT subject to keyDecodingStrategy conversion, so `threeDSChallengeURL(from:)`
+/// matches all literal forms (see PXP-5009 — reading only `challenge_url` dropped the real prod
+/// challenge and hung polling).
 package final class SessionEventConsumer: Sendable {
     private let channelsClient: any MollieChannelsClient
     private let sessionPoller: SessionPoller
@@ -97,6 +99,13 @@ package final class SessionEventConsumer: Sendable {
         for response: SessionResponse,
         into continuation: AsyncThrowingStream<ChannelEvent, Error>.Continuation
     ) {
+        // Production-validation logging (retained, internal-only): record the
+        // server's resolved `actionType` per poll so local prod testing can
+        // confirm/falsify which 3DS path the embedded flow takes —
+        // `threeDsChallenge` (the interceptor `challenge_url`, which emits the
+        // `challenge` postMessage the event-driven reveal keys on) vs `redirect`
+        // (the hosted page, which emits none). The raw `action_type` is also in
+        // the DevTools network log; this surfaces it on the lifecycle timeline.
         let mapped = map(response: response)
         switch mapped {
         case .threeDSChallengeReady, .redirectRequired:
@@ -178,9 +187,22 @@ package final class SessionEventConsumer: Sendable {
 
     private static func threeDSChallengeURL(from response: SessionResponse) -> URL? {
         guard case .known(.threeDsChallenge) = response.nextAction.actionType else { return nil }
-        // Wire key is snake_case ("challenge_url") — not converted by keyDecodingStrategy
-        // because params is a raw [String: AnyCodable] dictionary, not a Codable struct.
-        guard let raw = response.nextAction.params?["challenge_url"]?.value as? String else { return nil }
+        // The 3DS challenge/ACS URL key varies by which backend path produced
+        // the `threeDsChallenge` next-action:
+        //   - PayProc path emits `challengeUrl` (camelCase)
+        //   - the 3DS-v2 event path emits `acsURL`
+        //   - the dev-harness/mock emits `challenge_url` (snake_case)
+        // `params` is a raw [String: AnyCodable] dictionary, so its keys are NOT
+        // run through `keyDecodingStrategy` — we must match the literal wire key.
+        // Try the production keys first, then the mock/legacy fallbacks. Missing
+        // the real key silently drops the challenge → the WebView never presents
+        // and the poll times out (PXP-5009).
+        let params = response.nextAction.params
+        let raw = (params?["challengeUrl"]?.value as? String)
+            ?? (params?["acsURL"]?.value as? String)
+            ?? (params?["challenge_url"]?.value as? String)
+            ?? (params?["acs_url"]?.value as? String)
+        guard let raw else { return nil }
         return URL(string: raw)
     }
 

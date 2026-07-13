@@ -1,4 +1,5 @@
 import Foundation
+import MollieCore
 
 /// Override the Mollie service endpoints the payment sheet routes through.
 ///
@@ -27,10 +28,12 @@ public struct MolliePaymentEndpoints: @unchecked Sendable {
 
     /// URLSession used by the sheet's HTTP clients. `.production` uses a
     /// tuned session (bounded request/resource timeouts + connectivity
-    /// waiting — see `tunedProductionConfiguration()`); callers targeting a
-    /// non-production host can pass a session configured to trust that host
-    /// (e.g. one backed by a delegate that accepts a development server's
-    /// self-signed cert).
+    /// waiting — see `tunedProductionConfiguration()`) whose delegate
+    /// additionally enforces SPKI pinning against `productionPins` (see
+    /// `PublicKeyPinner`); callers targeting a non-production host can pass
+    /// a session configured to trust that host instead (e.g. one backed by
+    /// a delegate that accepts a development server's self-signed cert) —
+    /// dev/custom endpoints are unpinned by design.
     ///
     /// The struct is `@unchecked Sendable` because `URLSession` is a
     /// reference type that the compiler can't prove is Sendable in all
@@ -53,8 +56,51 @@ public struct MolliePaymentEndpoints: @unchecked Sendable {
     public static let production = MolliePaymentEndpoints(
         sessionsBaseURL: URL(string: "https://sessions.mollie.com")!, // swiftlint:disable:this force_unwrapping
         tokenizerBaseURL: URL(string: "https://api.cc.mollie.com")!, // swiftlint:disable:this force_unwrapping
-        urlSession: URLSession(configuration: tunedProductionConfiguration())
+        urlSession: URLSession(
+            configuration: tunedProductionConfiguration(),
+            delegate: PinningURLSessionDelegate(
+                pinner: PublicKeyPinner(pins: productionPins, expiry: productionPinExpiry, now: Date.init)
+            ),
+            delegateQueue: nil
+        )
     )
+
+    /// Base64 SPKI-SHA256 pins for the Google Trust Services chain that
+    /// issues certificates for both production hosts. Pinned at the
+    /// intermediate + root tier (not the leaf, which rotates far more
+    /// often) so routine cert renewal doesn't require an SDK release:
+    /// - GTS WR3 — the intermediate Google issues leaf certs from.
+    /// - GTS Root R1 (RSA) / GTS Root R4 (ECDSA) — the two root CAs a
+    ///   chain may present beneath that intermediate.
+    private static let productionSPKIPins: Set<String> = [
+        "OdSlmQD9NWJh4EbcOHBxkhygPwNSwA9Q91eounfbcoE=", // GTS WR3
+        "hxqRlPTu1bMS/0DITB1SSu0vd4u/8l8TjPgfaAp63Gc=", // GTS Root R1 (RSA)
+        "mEflZT5enoR1FuXLgYYGqnVEoZvmf9c2bVBpiOjYQ0c=", // GTS Root R4 (ECDSA)
+    ]
+
+    /// Pin set applied to both production hosts — `sessions.mollie.com` and
+    /// `api.cc.mollie.com` sit behind the same Google Trust Services chain,
+    /// so the same pins apply to each.
+    private static let productionPins: [String: Set<String>] = [
+        "sessions.mollie.com": productionSPKIPins,
+        "api.cc.mollie.com": productionSPKIPins,
+    ]
+
+    /// Pin-set expiry / rotation checkpoint. Once this date passes,
+    /// `PublicKeyPinner` stops enforcing `productionPins` and silently
+    /// falls back to system trust only — a missed rotation degrades
+    /// gracefully rather than bricking the app. Set ~2 years out from
+    /// when this pin set was authored (2026-07-07); before it arrives, the
+    /// pins must be reverified (or rotated) per
+    /// docs/security/tls-pin-rotation-runbook.md.
+    private static let productionPinExpiry: Date = {
+        var components = DateComponents()
+        components.year = 2028
+        components.month = 7
+        components.day = 7
+        components.timeZone = TimeZone(identifier: "UTC")
+        return Calendar(identifier: .gregorian).date(from: components)! // swiftlint:disable:this force_unwrapping
+    }()
 
     /// Builds the URLSession configuration used by `.production`.
     ///

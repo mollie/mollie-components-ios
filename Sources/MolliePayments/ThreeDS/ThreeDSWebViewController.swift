@@ -23,23 +23,66 @@
         /// custom scheme → prefix match + `UIApplication.open` handoff;
         /// http/https → host equality, in-WebView render.
         private let merchantReturnURL: URL?
-        /// How long the WebView stays hidden behind the "Authenticating…" cover
-        /// before being revealed. Frictionless / 3DS-method flows resolve (or the
-        /// poll loop dismisses the sheet) before this elapses, so the raw WebView
-        /// is never shown; a real interactive challenge outlives it and is
-        /// revealed. Injectable for tests. See epic t330.
-        private let revealDelay: TimeInterval
+        /// Strategy for lifting the "Authenticating…" cover.
+        ///
+        /// - `challengeDriven`: the interceptor `challenge_url` path. The cover
+        ///   stays up while the `mollie-interceptor` runs the 3DS method
+        ///   invisibly; it is lifted the instant a genuine `challenge`
+        ///   escalation arrives (see `receive(_:)`). `watchdog` is only a long
+        ///   safety backstop so a silent / broken interceptor can't hide the
+        ///   page forever — it is NOT a heuristic reveal timer.
+        /// - `eager`: the hosted `redirect` path (pay.mollie.nl), which runs no
+        ///   interceptor and emits no events. The cover is lifted after a short
+        ///   `delay` so a frictionless-via-poll redirect is still suppressed
+        ///   while a genuine interactive hosted page shows promptly.
+        enum RevealPolicy: Equatable {
+            case challengeDriven(watchdog: TimeInterval)
+            case eager(delay: TimeInterval)
+
+            var revealInterval: TimeInterval {
+                switch self {
+                case let .challengeDriven(watchdog): watchdog
+                case let .eager(delay): delay
+                }
+            }
+        }
+
+        /// Drives the time-based arm of the reveal (see `RevealPolicy`).
+        /// Injectable for tests.
+        private let revealPolicy: RevealPolicy
+        /// Present-on-demand mode. When true, the controller is hosted OFF-SCREEN
+        /// by the coordinator (no cover, nothing presented): the WKWebView runs
+        /// its 3DS round-trip invisibly while the merchant's own UI stays on
+        /// screen. The controller asks to be presented — via `onNeedsPresentation`
+        /// — only when an interactive challenge is genuinely required (a
+        /// `challenge` event, or the watchdog firing). A frictionless flow
+        /// resolves first and is torn down without ever presenting, so the user
+        /// sees no intermediary screen. When false (legacy / pushed path) the
+        /// controller installs the "Authenticating…" cover and reveals it in
+        /// place, as before.
+        private let presentOnDemand: Bool
+        /// Fired (once) in present-on-demand mode when the controller needs to be
+        /// surfaced to the user. The coordinator moves the hosted view into a
+        /// modal and presents it.
+        var onNeedsPresentation: (@MainActor () -> Void)?
         private var resolved = false
         private var revealed = false
+        private var presentationRequested = false
         private var webView: WKWebView?
         private var coverView: UIView?
         private var revealTask: Task<Void, Never>?
         private var messageHandler: ThreeDSMessageHandler?
 
-        init(challengeURL: URL, merchantReturnURL: URL? = nil, revealDelay: TimeInterval = 3.0) {
+        init(
+            challengeURL: URL,
+            merchantReturnURL: URL? = nil,
+            revealPolicy: RevealPolicy = .challengeDriven(watchdog: 15),
+            presentOnDemand: Bool = false
+        ) {
             self.challengeURL = challengeURL
             self.merchantReturnURL = merchantReturnURL
-            self.revealDelay = revealDelay
+            self.revealPolicy = revealPolicy
+            self.presentOnDemand = presentOnDemand
             super.init(nibName: nil, bundle: nil)
         }
 
@@ -94,7 +137,7 @@
             )
             config.userContentController.addUserScript(userScript)
 
-            let handler = ThreeDSMessageHandler { [weak self] result in self?.resolve(result) }
+            let handler = ThreeDSMessageHandler { [weak self] event in self?.receive(event) }
             messageHandler = handler
             config.userContentController.add(handler, name: "mollieChallenge")
             let webView = WKWebView(frame: view.bounds, configuration: config)
@@ -103,17 +146,28 @@
             view.addSubview(webView)
             webView.load(URLRequest(url: challengeURL))
             self.webView = webView
-            // Keep the WebView hidden behind a branded "Authenticating…" cover.
-            // It is revealed only if a real interactive challenge outlives
-            // `revealDelay`; frictionless / 3DS-method flows resolve (or the sheet
-            // is dismissed by the poll loop) first, so the raw WebView never shows.
             webView.accessibilityElementsHidden = true
-            installAuthenticatingCover()
-            scheduleReveal()
-            // Pushed onto the host's nav stack — UIKit renders the system back
-            // button automatically, and the coordinator observes the resulting
-            // pop to surface `.cancelled`. No explicit Cancel item required.
             title = "3-D Secure"
+
+            if presentOnDemand {
+                // Hosted off-screen by the coordinator: no cover, nothing visible.
+                // The WebView runs the 3DS round-trip invisibly; we surface the
+                // controller (via the watchdog or a `challenge` event) only if an
+                // interactive challenge is actually required. A Cancel item is
+                // installed so the user can back out once we DO present (the
+                // fullScreen modal has no interactive swipe-dismiss).
+                navigationItem.leftBarButtonItem = UIBarButtonItem(
+                    barButtonSystemItem: .cancel,
+                    target: self,
+                    action: #selector(cancelTapped)
+                )
+            } else {
+                // Legacy / pushed path: keep the WebView hidden behind a branded
+                // "Authenticating…" cover and reveal it in place — on a genuine
+                // `challenge` escalation, or the scheduled fallback timer.
+                installAuthenticatingCover()
+            }
+            scheduleReveal()
         }
 
         private func resolve(_ result: ThreeDSResult) {
@@ -126,6 +180,22 @@
             onResult?(result)
         }
 
+        /// Routes a parsed interceptor bridge event from the postMessage handler.
+        /// A `.challengeEscalation` is non-terminal: the issuer is presenting an
+        /// interactive challenge, so the cover lifts — but the flow does NOT
+        /// resolve (the `resolved` guard is untouched), so a later terminal
+        /// result still lands. A `.result` is terminal and resolves the flow.
+        /// Internal so unit tests can drive the routing without a live
+        /// `WKScriptMessage` (which has no public initialiser).
+        func receive(_ event: ThreeDSBridgeEvent) {
+            switch event {
+            case .challengeEscalation:
+                surface()
+            case let .result(result):
+                resolve(result)
+            }
+        }
+
         override func viewWillDisappear(_ animated: Bool) {
             super.viewWillDisappear(animated)
             // Covers the poll-driven dismissal path: the coordinator may tear the
@@ -136,21 +206,44 @@
             revealTask = nil
         }
 
-        // MARK: - Authenticating cover (deferred reveal)
+        // MARK: - Authenticating cover (event-driven reveal + watchdog)
 
+        /// Schedules the time-based arm of the reveal: the long safety watchdog
+        /// on the interceptor path, or the short reveal delay on the eager
+        /// redirect path (see `RevealPolicy`). On the interceptor path the cover
+        /// is normally lifted earlier by a `challenge` escalation via
+        /// `receive(_:)`; this task fires only if no such event ever arrives.
         private func scheduleReveal() {
             revealTask?.cancel()
-            let delay = revealDelay
+            let delay = revealPolicy.revealInterval
             revealTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 if Task.isCancelled { return }
-                self?.revealWebView()
+                self?.surface()
             }
         }
 
-        /// Reveal the live WebView by removing the "Authenticating…" cover.
-        /// Single-shot, and a no-op once the flow has resolved. Internal so unit
-        /// tests can drive the reveal deterministically without racing the timer.
+        /// Make the challenge visible to the user. In present-on-demand mode this
+        /// asks the coordinator to present the off-screen-hosted controller; in
+        /// the legacy/pushed mode it lifts the in-place "Authenticating…" cover.
+        /// A no-op once the flow has resolved.
+        private func surface() {
+            guard !resolved else { return }
+            if presentOnDemand { requestPresentation() } else { revealWebView() }
+        }
+
+        /// Present-on-demand: surface the off-screen-hosted controller. Single-shot.
+        private func requestPresentation() {
+            guard !resolved, !presentationRequested else { return }
+            presentationRequested = true
+            webView?.accessibilityElementsHidden = false
+            onNeedsPresentation?()
+        }
+
+        /// Legacy/pushed path: reveal the live WebView by removing the
+        /// "Authenticating…" cover. Single-shot, and a no-op once the flow has
+        /// resolved. Internal so unit tests can drive the reveal deterministically
+        /// without racing the timer.
         func revealWebView() {
             guard !revealed, !resolved else { return }
             revealed = true
@@ -163,6 +256,12 @@
             }, completion: { _ in
                 cover.removeFromSuperview()
             })
+        }
+
+        /// Test seam: whether the controller has asked to be presented
+        /// (present-on-demand mode). Internal for unit tests.
+        var hasRequestedPresentation: Bool {
+            presentationRequested
         }
 
         @objc private func cancelTapped() {

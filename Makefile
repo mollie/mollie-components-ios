@@ -75,6 +75,23 @@ example-build-public:
 
 # Mint a clientAccessToken for the demo app, standing in for your server.
 # The API key stays on this machine — it is never embedded in the app.
-#   make mint-demo-token API_KEY=test_xxxxxxxx
+#
+# Required:
+#   API_KEY=test_xxxxxxxx | live_xxxxxxxx
+# Optional (each defaults inside the script when left empty):
+#   SEQUENCE_TYPE=oneoff|first|recurring   CUSTOMER_ID=cst_xxx (required for first/recurring)
+#   AMOUNT=0.01  CURRENCY=EUR  DESCRIPTION="Demo subscription"
+#   REDIRECT_URL=https://example.com/return  API_BASE=https://api.mollie.com
+#
+#   make mint-demo-token API_KEY=test_xxx
+#   make mint-demo-token API_KEY=test_xxx SEQUENCE_TYPE=first CUSTOMER_ID=cst_xxx
 mint-demo-token:
-	@API_KEY="$(API_KEY)" bash Examples/MollieCheckoutDemo/Tools/mint-demo-token.sh
+	@API_KEY="$(API_KEY)" \
+		SEQUENCE_TYPE="$(SEQUENCE_TYPE)" \
+		CUSTOMER_ID="$(CUSTOMER_ID)" \
+		AMOUNT="$(AMOUNT)" \
+		CURRENCY="$(CURRENCY)" \
+		DESCRIPTION="$(DESCRIPTION)" \
+		REDIRECT_URL="$(REDIRECT_URL)" \
+		API_BASE="$(API_BASE)" \
+		bash Examples/MollieCheckoutDemo/Tools/mint-demo-token.sh

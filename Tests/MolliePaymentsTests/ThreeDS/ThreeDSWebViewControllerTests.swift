@@ -408,7 +408,7 @@
         func test_viewDidLoad_hidesWebViewBehindAuthenticatingCover() throws {
             let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
             // Large revealDelay so the deferred reveal can't fire mid-test.
-            let controller = ThreeDSWebViewController(challengeURL: url, revealDelay: 1000)
+            let controller = ThreeDSWebViewController(challengeURL: url, revealPolicy: .challengeDriven(watchdog: 1000))
             _ = controller.view
             let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
             let cover = try XCTUnwrap(Mirror(reflecting: controller).descendant("coverView") as? UIView)
@@ -426,7 +426,7 @@
 
         func test_revealWebView_restoresWebViewAccessibility() throws {
             let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
-            let controller = ThreeDSWebViewController(challengeURL: url, revealDelay: 1000)
+            let controller = ThreeDSWebViewController(challengeURL: url, revealPolicy: .challengeDriven(watchdog: 1000))
             _ = controller.view
             let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
             XCTAssertTrue(webView.accessibilityElementsHidden)
@@ -439,7 +439,7 @@
 
         func test_cancelButton_resolvesCancelled_andBlocksLaterReveal() throws {
             let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
-            let controller = ThreeDSWebViewController(challengeURL: url, revealDelay: 1000)
+            let controller = ThreeDSWebViewController(challengeURL: url, revealPolicy: .challengeDriven(watchdog: 1000))
             _ = controller.view
             var result: ThreeDSResult?
             controller.onResult = { result = $0 }
@@ -457,6 +457,197 @@
                 webView.accessibilityElementsHidden,
                 "Reveal after resolution must be a no-op"
             )
+        }
+
+        // MARK: - Event-driven reveal (epic t338)
+
+        func test_receiveChallengeEscalation_revealsWebView() throws {
+            // A genuine `challenge` escalation from the interceptor means the
+            // issuer is presenting an interactive challenge — the cover must
+            // lift immediately, independent of the watchdog.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000)
+            )
+            _ = controller.view
+            let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
+            XCTAssertTrue(webView.accessibilityElementsHidden)
+            controller.receive(.challengeEscalation)
+            XCTAssertFalse(
+                webView.accessibilityElementsHidden,
+                "A challenge escalation must reveal the WebView immediately"
+            )
+        }
+
+        func test_receiveCompleteBeforeChallenge_resolvesAuthenticated_withoutRevealing() throws {
+            // The frictionless-within-challenge case: the ACS auto-completes and
+            // emits `complete` with NO preceding `challenge`. The flow must
+            // resolve `.authenticated` while the cover stays up — the user never
+            // sees the raw interceptor page.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000)
+            )
+            _ = controller.view
+            var result: ThreeDSResult?
+            controller.onResult = { result = $0 }
+            let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
+
+            controller.receive(.result(.authenticated))
+
+            XCTAssertEqual(result, .authenticated, "A terminal complete must resolve the flow")
+            XCTAssertTrue(
+                webView.accessibilityElementsHidden,
+                "Frictionless complete (no preceding challenge) must NOT reveal the WebView"
+            )
+        }
+
+        func test_noEventWithinWatchdog_revealsViaWatchdog() async throws {
+            // Safety backstop: if a genuinely interactive page never emits a
+            // `challenge` (or the interceptor is broken/silent), the long
+            // watchdog must still reveal the WebView so the flow can't hang
+            // invisibly forever.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 0.05)
+            )
+            _ = controller.view
+            let webView = try XCTUnwrap(Mirror(reflecting: controller).descendant("webView") as? WKWebView)
+            XCTAssertTrue(webView.accessibilityElementsHidden)
+
+            try await Task.sleep(nanoseconds: 300_000_000)
+
+            XCTAssertFalse(
+                webView.accessibilityElementsHidden,
+                "Watchdog must reveal the WebView when no challenge event ever arrives"
+            )
+        }
+
+        func test_receiveResultFailed_resolvesFailed() throws {
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000)
+            )
+            _ = controller.view
+            var result: ThreeDSResult?
+            controller.onResult = { result = $0 }
+            controller.receive(.result(.failed(reason: .challengeFailed)))
+            XCTAssertEqual(result, .failed(reason: .challengeFailed))
+        }
+
+        func test_receiveResultCancelled_resolvesCancelled() throws {
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000)
+            )
+            _ = controller.view
+            var result: ThreeDSResult?
+            controller.onResult = { result = $0 }
+            controller.receive(.result(.cancelled))
+            XCTAssertEqual(result, .cancelled)
+        }
+
+        func test_challengeEscalation_doesNotTripResolveGuard() throws {
+            // The non-terminal challenge must not satisfy the single-shot
+            // `resolved` guard — a terminal result arriving afterwards must
+            // still resolve the flow.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000)
+            )
+            _ = controller.view
+            var result: ThreeDSResult?
+            controller.onResult = { result = $0 }
+
+            controller.receive(.challengeEscalation)
+            XCTAssertNil(result, "Challenge escalation is non-terminal and must not resolve")
+
+            controller.receive(.result(.authenticated))
+            XCTAssertEqual(
+                result,
+                .authenticated,
+                "A terminal result after a challenge escalation must still resolve"
+            )
+        }
+
+        // MARK: - Present-on-demand (epic t338): no screen unless a challenge needs it
+
+        func test_presentOnDemand_installsNoCover() throws {
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000),
+                presentOnDemand: true
+            )
+            _ = controller.view
+            XCTAssertNil(
+                Mirror(reflecting: controller).descendant("coverView") as? UIView,
+                "Present-on-demand hosts the WebView off-screen — no in-place cover"
+            )
+        }
+
+        func test_presentOnDemand_challengeEscalation_requestsPresentation() throws {
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000),
+                presentOnDemand: true
+            )
+            var requested = false
+            controller.onNeedsPresentation = { requested = true }
+            _ = controller.view
+
+            controller.receive(.challengeEscalation)
+
+            XCTAssertTrue(requested, "A challenge escalation must ask the coordinator to present")
+            XCTAssertTrue(controller.hasRequestedPresentation)
+        }
+
+        func test_presentOnDemand_completeBeforeChallenge_resolvesWithoutPresenting() throws {
+            // The frictionless case: a terminal complete with no preceding
+            // challenge must resolve `.authenticated` and NEVER ask to present —
+            // so the user sees no intermediary screen.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000),
+                presentOnDemand: true
+            )
+            var result: ThreeDSResult?
+            var requested = false
+            controller.onResult = { result = $0 }
+            controller.onNeedsPresentation = { requested = true }
+            _ = controller.view
+
+            controller.receive(.result(.authenticated))
+
+            XCTAssertEqual(result, .authenticated)
+            XCTAssertFalse(requested, "Frictionless complete must NOT present anything")
+            XCTAssertFalse(controller.hasRequestedPresentation)
+        }
+
+        func test_presentOnDemand_watchdog_requestsPresentation() async throws {
+            // Backstop: if no event ever arrives, the watchdog must surface the
+            // controller so the flow can't hang invisibly.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 0.05),
+                presentOnDemand: true
+            )
+            var requested = false
+            controller.onNeedsPresentation = { requested = true }
+            _ = controller.view
+
+            try await Task.sleep(nanoseconds: 300_000_000)
+
+            XCTAssertTrue(requested, "Watchdog must request presentation when no event arrives")
         }
 
         private static func firstButton(in view: UIView) -> UIButton? {
