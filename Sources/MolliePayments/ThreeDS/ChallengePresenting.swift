@@ -36,7 +36,7 @@ package protocol ChallengePresenting: Sendable {
 
     /// Force-dismiss an in-flight presentation and resolve it as `.cancelled`.
     ///
-    /// PXP-5009: a frictionless-hosted 3DS page completes the payment
+    /// A frictionless-hosted 3DS page completes the payment
     /// server-side without ever navigating to the return URL or firing the
     /// `mollie-interceptor` postMessage, so `present`/`presentRedirect` never
     /// resolves on its own even after the coordinator's poller has already

@@ -1,14 +1,15 @@
 #if canImport(UIKit)
     import UIKit
 
-    /// Finds the topmost view controller that `MolliePaymentSheet.present(...)`
-    /// can present from in a SwiftUI app.
+    /// Finds the topmost view controller that a 3DS challenge can present
+    /// from in a SwiftUI app.
     ///
     /// The walk is: foreground-active `UIWindowScene` → key window → root
     /// view controller → topmost already-presented descendant. SwiftUI hosts
-    /// don't expose a `UIViewController` directly to user code, so the
-    /// SwiftUI view-modifier needs this lookup to bridge into the UIKit
-    /// `present(...)` path.
+    /// don't expose a `UIViewController` directly to user code, so
+    /// `MollieCardComponent`'s embed bridge needs this lookup to find
+    /// somewhere to host the modal 3DS challenge on top of the (non-modal)
+    /// embedded form.
     ///
     /// Returns `nil` in two real situations:
     /// - the app has no active scene (background launch, app extension)

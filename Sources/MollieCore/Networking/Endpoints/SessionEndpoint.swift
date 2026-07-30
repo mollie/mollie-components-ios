@@ -42,16 +42,17 @@ public enum SessionEndpoint {
 
     /// Charging POST that authorizes the payment — **not auto-retried**.
     ///
-    /// Per spike #316 (Model B, token-as-anchor), the Sessions Service honours
-    /// no inbound idempotency header on this endpoint, so the SDK emits none
-    /// and never transparently retries it (POST is excluded from `isIdempotent`
-    /// in `SessionClient`). Auto-retrying with no server-side dedup would risk a
-    /// duplicate authorization. The `checkoutAttemptToken` in the response is
-    /// the natural dedup anchor: on an indeterminate failure the SDK surfaces
-    /// `.timeout` and the merchant reconciles server-side via checkout-attempt
-    /// state. In-process re-taps are guarded by `SingleFlight` in
-    /// `CardPaymentCoordinator.runSubmit`. See decisions-log "2026-06-23 —
-    /// Network idempotency model decided (spike #316 resolved)".
+    /// Per the network idempotency model (Model B, token-as-anchor), the
+    /// Sessions Service honours no inbound idempotency header on this endpoint,
+    /// so the SDK emits none and never transparently retries it (POST is
+    /// excluded from `isIdempotent` in `SessionClient`). Auto-retrying with no
+    /// server-side dedup would risk a duplicate authorization. The
+    /// `checkoutAttemptToken` in the response is the natural dedup anchor: on
+    /// an indeterminate failure the SDK surfaces `.timeout` and the merchant
+    /// reconciles server-side via checkout-attempt state. In-process re-taps
+    /// are guarded by `SingleFlight` in `CardPaymentCoordinator.runSubmit`.
+    /// This idempotency model was confirmed with the Sessions Service on
+    /// 2026-06-23.
     public static func createCheckoutAttempt(
         sessionToken: String,
         body: CreateCheckoutAttemptRequest

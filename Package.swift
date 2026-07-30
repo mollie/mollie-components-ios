@@ -9,16 +9,21 @@ let package = Package(
         .macOS(.v13),
     ],
     products: [
-        .library(name: "MollieCore", targets: ["MollieCore"]),
-        .library(name: "MolliePayments", targets: ["MolliePayments"]),
-        .library(name: "MolliePaymentsUI", targets: ["MolliePaymentsUI"]),
         .library(name: "MollieComponents", targets: ["MollieComponents"]),
+    ],
+    dependencies: [
+        // Real-time "doorbell" transport for the checkout-attempt flow. Only
+        // MollieCore links it (its Channels/ layer); no other target may.
+        .package(url: "https://github.com/pusher/pusher-websocket-swift.git", .upToNextMajor(from: "10.1.10")),
     ],
     targets: [
         // MARK: - Library targets
 
         .target(
             name: "MollieCore",
+            dependencies: [
+                .product(name: "PusherSwift", package: "pusher-websocket-swift"),
+            ],
             path: "Sources/MollieCore",
             resources: [.copy("PrivacyInfo.xcprivacy")]
         ),

@@ -1,8 +1,9 @@
 #if canImport(UIKit)
+    import MolliePayments
     import UIKit
 
-    /// PAN field. MR4 ships the bare subclass with iOS-16-safe content type;
-    /// MR5 attaches the cursor-stable masking + Luhn validation.
+    /// PAN field with iOS-16-safe content type, cursor-stable masking, and
+    /// Luhn validation.
     package final class CardNumberTextField: UITextField {
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -54,11 +55,85 @@
             raw.filter { $0.isASCII && $0.isNumber }
         }
 
+        /// Local, synchronous scheme guess from the field's own digits —
+        /// only ever reads the leading 8 digits (PCI: never the full PAN).
+        /// Delegates the Set -> single-scheme collapse to
+        /// `CardScheme.primary(from:)`, the single home for that priority
+        /// order shared with `MollieCardFormViewController`'s brand icon.
+        private static func primaryScheme(forDigits digits: String) -> CardScheme? {
+            let prefix = String(digits.prefix(8))
+            let schemes = BINPrefixTable.detect(prefix: prefix)
+            return CardScheme.primary(from: schemes)
+        }
+
+        /// Per-brand PAN length. Amex is fixed at 15; every other scheme
+        /// (including Diners, which is fixed at 14 but co-badges into
+        /// longer ranges in practice) caps at 19 — the PCI upper bound for
+        /// issuer-assigned PANs and the same ceiling `CardFormValidator`
+        /// enforces. A tighter per-brand cap here would silently truncate
+        /// digits off a valid long or co-badged PAN before the validator
+        /// ever saw them, failing Luhn with a misleading "too short"/
+        /// "check for typos" error instead of the field just accepting
+        /// what the user typed.
+        private static func maxDigits(for scheme: CardScheme?) -> Int {
+            switch scheme {
+            case .amex: 15
+            default: 19
+            }
+        }
+
+        /// Inserts a single space after each group. `sizes` sums to (at
+        /// most) `digits.count`; a shorter `digits` simply stops early so
+        /// partial input formats correctly while still typing.
+        private static func chunk(_ digits: String, sizes: [Int]) -> String {
+            var result = ""
+            var index = digits.startIndex
+            for size in sizes {
+                guard index < digits.endIndex else { break }
+                let end = digits.index(index, offsetBy: size, limitedBy: digits.endIndex) ?? digits.endIndex
+                if !result.isEmpty {
+                    result += " "
+                }
+                result += digits[index ..< end]
+                index = end
+            }
+            return result
+        }
+
+        /// Groups of 4 for every scheme without a bespoke layout (Visa,
+        /// Mastercard, Maestro, Discover, Diners Club, JCB, UnionPay, Cartes
+        /// Bancaires, unrecognised prefixes). Diners' 4-6-4 layout only sums
+        /// to 14 digits, so it can't represent the 16-19 digit co-badged
+        /// PANs the 19-digit cap now allows through; grouping is cosmetic
+        /// (unlike the cap, which is the correctness issue), so Diners
+        /// falls back to the same groups-of-4 layout as everything else.
+        private static func chunkByFour(_ digits: String) -> String {
+            chunk(digits, sizes: Array(repeating: 4, count: (digits.count + 3) / 4))
+        }
+
+        /// Strips non-digits, hard-caps at the detected brand's PAN length,
+        /// then live-groups with brand-appropriate separators: Amex 4-6-5,
+        /// everything else 4-4-4-4(-…). The brand comes from this field's
+        /// own digits via `BINPrefixTable.detect` — same local, synchronous,
+        /// offline detection `MollieCardFormViewController` uses for the
+        /// brand icon, so the grouping never waits on a network round-trip.
+        package static func format(_ raw: String) -> String {
+            let digits = digitsOnly(raw)
+            let scheme = primaryScheme(forDigits: digits)
+            let limited = String(digits.prefix(maxDigits(for: scheme)))
+            switch scheme {
+            case .amex:
+                return chunk(limited, sizes: [4, 6, 5])
+            default:
+                return chunkByFour(limited)
+            }
+        }
+
         @objc private func sanitize() {
             let raw = text ?? ""
-            let filtered = Self.digitsOnly(raw)
-            guard filtered != raw else { return }
-            text = filtered
+            let formatted = Self.format(raw)
+            guard formatted != raw else { return }
+            text = formatted
             if let endRange = textRange(from: endOfDocument, to: endOfDocument) {
                 selectedTextRange = endRange
             }

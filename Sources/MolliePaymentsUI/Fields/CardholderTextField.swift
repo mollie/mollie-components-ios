@@ -1,7 +1,7 @@
 #if canImport(UIKit)
     import UIKit
 
-    /// Cardholder-name field. Thin subclass so MR5 can attach validation
+    /// Cardholder-name field. Thin subclass so validation can be attached
     /// without churning the form-controller code.
     package final class CardholderTextField: UITextField {
         override init(frame: CGRect) {

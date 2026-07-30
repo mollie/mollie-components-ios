@@ -9,7 +9,8 @@ import MollieCore
 package enum CreateCheckoutAttemptRequestFactory {
     package static func creditCard(
         pspToken: String,
-        fingerprint: DeviceFingerprint
+        fingerprint: DeviceFingerprint,
+        customerDetails: MollieCustomerDetails? = nil
     ) -> CreateCheckoutAttemptRequest {
         CreateCheckoutAttemptRequest(
             paymentMethod: "creditcard",
@@ -17,7 +18,8 @@ package enum CreateCheckoutAttemptRequestFactory {
             fingerprint: fingerprint,
             pspToken: pspToken,
             wallet: nil,
-            walletToken: nil
+            walletToken: nil,
+            customerDetails: customerDetails
         )
     }
 }

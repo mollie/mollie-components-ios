@@ -34,5 +34,26 @@
             field.sendActions(for: .editingChanged)
             XCTAssertEqual(field.text, "123")
         }
+
+        // MARK: - Hard cap
+
+        // Static, directly testable — see CardNumberTextFieldTests for why
+        // `sendActions` isn't used here.
+
+        func test_format_capsAtFourDigits() {
+            XCTAssertEqual(CVCTextField.format("12345"), "1234")
+        }
+
+        func test_format_stripsLettersThenCaps() {
+            XCTAssertEqual(CVCTextField.format("1a2b3c4d5"), "1234")
+        }
+
+        func test_format_underFourDigits_unchanged() {
+            XCTAssertEqual(CVCTextField.format("123"), "123")
+        }
+
+        func test_format_empty_returnsEmpty() {
+            XCTAssertEqual(CVCTextField.format(""), "")
+        }
     }
 #endif

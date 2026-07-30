@@ -1,0 +1,33 @@
+<!--
+  PLACEHOLDER SLOT — not a Maestro mark.
+  The Mollie Web SDK has no Maestro artwork either — it renders
+  nothing for this scheme. A real Maestro mark must be sourced
+  separately from Mastercard's official brand kit and this file
+  replaced with it. Until then this slot intentionally reuses the
+  generic scheme placeholder artwork so `UIImage(named: "card-maestro")`
+  resolves to something reasonable instead of nil.
+-->
+<svg viewBox="0 -1 27 21" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="27" height="17" rx="3" fill="#D2D3DD" />
+  <rect x=".5" y=".5" width="26" height="14" rx="2.5" stroke="#A0A3B2" stroke-opacity=".05" />
+  <path
+    d="M8.333 6.833H4.167a.833.833 0 0 0-.834.834v2.5c0 .46.373.833.834.833h4.166c.46 0 .834-.373.834-.833v-2.5a.833.833 0 0 0-.834-.833Z"
+    fill="url(#a)"
+  />
+  <path
+    opacity=".3"
+    d="M5 8.084a.417.417 0 0 0-.833 0V9.75a.417.417 0 0 0 .833 0V8.084ZM6.667 8.084a.417.417 0 0 0-.834 0V9.75a.417.417 0 0 0 .834 0V8.084ZM8.333 8.084a.417.417 0 1 0-.833 0V9.75a.417.417 0 1 0 .833 0V8.084Z"
+    fill="#7A3802"
+  />
+  <path
+    opacity=".3"
+    d="M7.5 13.917a.417.417 0 0 0-.417-.417H3.75a.417.417 0 1 0 0 .833h3.333c.23 0 .417-.186.417-.416ZM5.833 15.584a.417.417 0 0 0-.416-.417H3.75a.417.417 0 1 0 0 .833h1.667c.23 0 .416-.186.416-.416ZM9.166 15.584a.417.417 0 0 0-.416-.417H7.083a.417.417 0 1 0 0 .833H8.75c.23 0 .416-.186.416-.416ZM12.5 15.584a.417.417 0 0 0-.417-.417h-1.666a.417.417 0 1 0 0 .833h1.666c.23 0 .417-.186.417-.416ZM12.5 13.917a.417.417 0 0 0-.417-.417H8.75a.417.417 0 1 0 0 .833h3.333c.23 0 .417-.186.417-.416ZM17.5 13.917a.417.417 0 0 0-.417-.417H13.75a.417.417 0 1 0 0 .833h3.333c.23 0 .417-.186.417-.416ZM22.5 13.917a.417.417 0 0 0-.417-.417H18.75a.417.417 0 1 0 0 .833h3.333c.23 0 .417-.186.417-.416Z"
+    fill="#111"
+  />
+  <defs>
+    <linearGradient id="a" x1="9.167" y1="6.833" x2="9.167" y2="11" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FAD961" />
+      <stop offset="1" stop-color="#F7955D" />
+    </linearGradient>
+  </defs>
+</svg>

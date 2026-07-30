@@ -27,11 +27,11 @@ enum Example: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .paymentSheetSwiftUI:
-            "Present the SDK sheet with the .molliePaymentSheet modifier."
+            "Present MollieCardComponent in your own .sheet."
         case .cardFormSwiftUI:
-            "Embed MolliePaymentCardFormView inline in a SwiftUI layout."
+            "Embed MollieCardComponent inline in a SwiftUI layout."
         case .paymentSheetUIKit:
-            "Present the sheet from a UIViewController."
+            "Present MollieCheckout's card form from a UIViewController."
         }
     }
 }

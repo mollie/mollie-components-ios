@@ -73,7 +73,9 @@ private actor AsyncGate {
     private var isOpen = false
 
     func wait() async {
-        if isOpen { return }
+        if isOpen {
+            return
+        }
         await withCheckedContinuation { continuation in
             continuations.append(continuation)
         }

@@ -36,11 +36,30 @@ package final class SessionPoller: Sendable {
         self.schedule = schedule
     }
 
+    /// Overall time budget the poll loop enforces (`PollingSchedule.totalBudget`).
+    /// Exposed so the Pusher doorbell phase in `SessionEventConsumer.observeAttempt`
+    /// can apply the SAME overall deadline it does — without it a quiet-but-connected
+    /// socket would run the doorbell phase unbounded (no timeout ever raised),
+    /// a regression vs the poll-only path which always terminates within this budget.
+    package var totalBudget: TimeInterval {
+        schedule.totalBudget
+    }
+
     package func poll() -> AsyncThrowingStream<SessionResponse, Error> {
+        poll(schedule: schedule)
+    }
+
+    /// Session-status poll with an explicit schedule/budget override. Used by
+    /// `SessionEventConsumer.observeAttempt` to run a concurrent session-level
+    /// completion poll (`GET /sessions`) alongside the checkout-attempt path —
+    /// with a longer, challenge-aware budget — because a card 3DS attempt
+    /// projection can stall at `AUTHENTICATION_PENDING` while the underlying
+    /// SESSION resource reaches `completed`.
+    package func poll(schedule overrideSchedule: PollingSchedule) -> AsyncThrowingStream<SessionResponse, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task { [httpClient, sessionToken, schedule] in
+            let task = Task { [httpClient, sessionToken] in
                 await Self.runPollLoop(
-                    schedule: schedule,
+                    schedule: overrideSchedule,
                     timeoutOperation: "session-polling",
                     continuation: continuation,
                     fetch: {
@@ -113,6 +132,35 @@ package final class SessionPoller: Sendable {
         }
     }
 
+    /// Single-shot `GET /checkout-attempts/` + per-attempt lookup. Returns the
+    /// `SessionResponse` for this poller's `checkoutAttemptToken`, or `nil` for
+    /// a transient miss (backend hasn't populated the per-attempt state yet).
+    ///
+    /// This is the doorbell/watchdog fetch seam used by
+    /// `SessionEventConsumer.observeAttempt`'s concurrent merge: each Pusher
+    /// doorbell (and the inactivity watchdog) drives ONE `fetchAttempt()` whose
+    /// result the consumer diffs by `nextAction.eventId`. It uses the exact same
+    /// endpoint and lookup as `pollAttempt()`'s loop so the Pusher-sourced
+    /// re-fetch and the HTTP-poll fallback agree on what a fetch returns —
+    /// the only difference is *who* drives the cadence (doorbell vs timer).
+    ///
+    /// Dedup is intentionally NOT done here: the consumer owns a single
+    /// `eventId` dedup across all sources (doorbell, watchdog, poll fallback)
+    /// so overlapping fetches can't double-emit. Errors propagate to the caller
+    /// untouched — the consumer decides how to absorb/fail.
+    package func fetchAttempt() async throws -> SessionResponse? {
+        guard let checkoutAttemptToken else {
+            throw MollieError.invalidConfiguration(
+                field: "checkoutAttemptToken",
+                reason: "fetchAttempt() requires a checkoutAttemptToken — use init(httpClient:sessionToken:checkoutAttemptToken:)"
+            )
+        }
+        let map = try await httpClient.perform(
+            SessionEndpoint.getCheckoutAttempts(sessionToken: sessionToken)
+        )
+        return map[checkoutAttemptToken]
+    }
+
     // MARK: - Shared poll loop
 
     /// Maximum number of consecutive `.skipNoAdvance` outcomes before the
@@ -175,6 +223,53 @@ package final class SessionPoller: Sendable {
         case skipNoAdvance
     }
 
+    /// Races an async operation against a wall-clock deadline. If `body`
+    /// finishes first its value is returned; if the deadline elapses first a
+    /// terminal `MollieError.timeout(operation:)` is thrown and the losing
+    /// child task is cancelled. Used to bound a single `fetch()` so the shared
+    /// production `URLSession` (`waitsForConnectivity = true`,
+    /// `timeoutIntervalForResource = 120`) cannot block a poll past its budget.
+    private static func withTimeout<T: Sendable>(
+        seconds: Double, operation: String,
+        _ body: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await body() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw MollieError.timeout(operation: operation)
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw MollieError.timeout(operation: operation)
+            }
+            return result
+        }
+    }
+
+    /// Runs `fetch`, bounding it by the poll budget REMAINING at this instant
+    /// when `totalBudget` is finite. When `totalBudget` is non-finite
+    /// (`.infinity`, the "host owns cancellation" wiring) the fetch runs
+    /// unbounded — preserving the prior behaviour exactly. The remaining budget
+    /// is clamped to a small positive floor so a nearly-exhausted budget still
+    /// yields a valid (immediately-firing) deadline rather than a zero/negative
+    /// sleep.
+    private static func boundedFetch<Response: Sendable>(
+        _ fetch: @escaping @Sendable () async throws -> Response,
+        schedule: PollingSchedule,
+        start: ContinuousClock.Instant,
+        operation: String
+    ) async throws -> Response {
+        guard schedule.totalBudget.isFinite else {
+            return try await fetch()
+        }
+        let elapsed = start.duration(to: .now)
+        let elapsedSeconds =
+            Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        let remaining = max(schedule.totalBudget - elapsedSeconds, 0.001)
+        return try await withTimeout(seconds: remaining, operation: operation, fetch)
+    }
+
     // swiftlint:disable cyclomatic_complexity
     /// Drives the shared poll cadence: initial poll → (sleep → cancel-check →
     /// timeout-check → fetch → process)*. Yields onto `continuation`.
@@ -182,11 +277,11 @@ package final class SessionPoller: Sendable {
     /// The cyclomatic count is intrinsic to the state machine (init/loop ×
     /// fetch/sleep/cancel/timeout × outcome); splitting further fragments
     /// the cancellation/timeout contract without reducing real complexity.
-    private static func runPollLoop<Yielded, Response>(
+    private static func runPollLoop<Yielded, Response: Sendable>(
         schedule: PollingSchedule,
         timeoutOperation: String,
         continuation: AsyncThrowingStream<Yielded, Error>.Continuation,
-        fetch: () async throws -> Response,
+        fetch: @escaping @Sendable () async throws -> Response,
         process: (Response) -> PollOutcome<Yielded>
     ) async {
         let start = ContinuousClock.now
@@ -202,7 +297,9 @@ package final class SessionPoller: Sendable {
         var consecutiveFetchFailures = 0
         // Initial poll — no leading sleep.
         do {
-            let firstResponse = try await fetch()
+            let firstResponse = try await Self.boundedFetch(
+                fetch, schedule: schedule, start: start, operation: timeoutOperation
+            )
             switch process(firstResponse) {
             case let .yield(value):
                 continuation.yield(value)
@@ -256,7 +353,9 @@ package final class SessionPoller: Sendable {
             // swiftlint:enable opening_brace
             let response: Response
             do {
-                response = try await fetch()
+                response = try await Self.boundedFetch(
+                    fetch, schedule: schedule, start: start, operation: timeoutOperation
+                )
             } catch {
                 // Terminal/auth → propagate immediately (no retry). Transient
                 // (retryable URLError / 5xx) → absorb and keep polling while

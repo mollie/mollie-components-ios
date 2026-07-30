@@ -27,7 +27,7 @@ final class MollieHostedCheckoutCancelMatcherTests: XCTestCase {
     }
 
     func test_matches_mollieCheckoutEmptyErrorCode_returnsFalse() throws {
-        // FIX #18: `?error_code=` (empty) carries no signal. Previously this
+        // `?error_code=` (empty) carries no signal. Previously this
         // matched and parseResult emitted the useless token `mollie_error_`.
         let url = try XCTUnwrap(URL(string: "https://www.mollie.com/checkout/credit-card/return?error_code="))
         XCTAssertFalse(matcher.matches(url))

@@ -24,19 +24,26 @@ Merchants import only the umbrella module:
 import MollieComponents
 ```
 
-The sub-modules (`MollieCore`, `MolliePayments`, `MolliePaymentsUI`) are available for advanced integrations, but the entire merchant surface is reachable through `MollieComponents` alone.
+`MollieComponents` is the only library the package exposes — the entire merchant surface is reachable through it alone.
 
-## Present the sheet (UIKit)
+## Build a checkout
 
-``MolliePaymentSheet`` exposes a single static, `async` entry point. Pass the view controller to present from and the client access token your backend minted for this session; `await` the terminal outcome:
+``MollieCheckout`` owns the session context for a client access token. The SDK never presents its own sheet — you own presentation, either by pushing the card form modally from a `UIViewController`, or by embedding ``MollieCardComponent`` in your own SwiftUI layout (including your own `.sheet`, if you want a modal).
 
 ```swift
 import MollieComponents
 
-let result = await MolliePaymentSheet.present(
-    from: viewController,
-    clientToken: clientToken
-)
+let checkout = try MollieCheckout(clientToken: clientToken)
+```
+
+Construction decodes the token eagerly and throws if it's malformed, so you can fail fast before presenting anything.
+
+## Present modally (UIKit)
+
+Call `presentCard(from:)` with the host view controller and `await` the terminal outcome:
+
+```swift
+let result = await checkout.presentCard(from: viewController)
 
 switch result {
 case .completed(let payment):
@@ -51,11 +58,11 @@ case .cancelled:
 }
 ```
 
-The `theme` parameter is optional and defaults to Mollie branding. To restyle the sheet, pass a custom theme — see <doc:Theming>.
+The sheet always renders with Mollie's branded appearance — see <doc:Theming>.
 
 ## Present inline (SwiftUI)
 
-For SwiftUI hosts you have two options. Use the `molliePaymentSheet(isPresented:clientToken:theme:endpoints:onResult:)` modifier to drive a modal from a `Bool` binding:
+Vend the embeddable form with `makeCardComponent(onResult:)` and place it in your own layout — including your own `.sheet`, if you want a modal:
 
 ```swift
 import MollieComponents
@@ -67,21 +74,26 @@ struct CheckoutScreen: View {
 
     var body: some View {
         Button("Pay") { isPaying = true }
-            .molliePaymentSheet(isPresented: $isPaying, clientToken: clientToken) { result in
-                switch result {
-                case .completed(let payment): break
-                case .failed(let error): break
-                case .cancelled: break
+            .sheet(isPresented: $isPaying) {
+                if let checkout = try? MollieCheckout(clientToken: clientToken) {
+                    checkout.makeCardComponent { result in
+                        switch result {
+                        case .completed(let payment): break
+                        case .failed(let error): break
+                        case .cancelled: break
+                        }
+                        isPaying = false
+                    }
                 }
             }
     }
 }
 ```
 
-Or embed the card form directly in your layout with ``MolliePaymentCardFormView`` — no modal, the form's own "Pay with card" button is the call to action:
+Or embed the card form directly in your layout with ``MollieCardComponent`` — no modal, the form's own "Pay with card" button is the call to action:
 
 ```swift
-MolliePaymentCardFormView(clientToken: clientToken) { result in
+checkout.makeCardComponent { result in
     // Same MolliePaymentResult, fired exactly once
 }
 ```
@@ -96,5 +108,5 @@ Every entry point resolves to the same ``MolliePaymentResult``:
 
 ## Next steps
 
-- <doc:Theming> — restyle the sheet to match your brand.
+- <doc:Theming> — how the sheet's appearance works.
 - <doc:HandlingErrors> — the complete merchant error reference.

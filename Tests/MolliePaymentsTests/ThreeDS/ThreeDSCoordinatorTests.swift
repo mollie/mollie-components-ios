@@ -14,7 +14,6 @@ import XCTest
     @MainActor
     final class ThreeDSCoordinatorTests: XCTestCase {
         private func makeChallengeURL() -> URL {
-            // swiftlint:disable:next force_unwrapping
             URL(string: "https://3ds.example.com/challenge")!
         }
 
@@ -133,7 +132,9 @@ import XCTest
         ) async throws {
             let deadline = Date().addingTimeInterval(timeout)
             while Date() < deadline {
-                if condition() { return }
+                if condition() {
+                    return
+                }
                 try await Task.sleep(nanoseconds: 5_000_000)
             }
         }

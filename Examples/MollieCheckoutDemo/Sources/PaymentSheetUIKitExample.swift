@@ -1,20 +1,20 @@
 import MollieComponents
-import MolliePaymentsUI
 import SwiftUI
 import UIKit
 
 // MARK: - Integration shape: UIKit payment sheet
 
 //
-// The UIKit mirror of PaymentSheetExample. From any `UIViewController`, call
-// the async `MolliePaymentSheet.present(from:clientToken:theme:)` and await
-// the typed `MolliePaymentResult`. The SDK presents its modal card form from
-// the host view controller you pass in.
+// The UIKit mirror of PaymentSheetExample. Build a `MollieCheckout` from the
+// client token, then call the async `presentCard(from:)` and await the
+// typed `MolliePaymentResult`. The SDK presents its modal card form from the
+// host view controller you pass in — the host still owns the enclosing
+// navigation/presentation context.
 //
-// Defaults used here:
-//   • theme: omitted → the Mollie-branded default theme.
-//   • Production endpoints are the default — `present(from:clientToken:)`
-//     targets Mollie production. A merchant app never overrides this.
+// Appearance always renders with the Mollie-branded default theme — there is
+// no public way to override it. Production endpoints are the default —
+// `MollieCheckout(clientToken:)` targets Mollie production. A merchant app
+// never overrides this.
 //
 // `PaymentSheetUIKitExample` (bottom of this file) is a thin
 // `UIViewControllerRepresentable` so the SwiftUI RootView can navigate to
@@ -40,21 +40,25 @@ final class PaymentSheetUIKitViewController: UIViewController {
         tokenField.text ?? ""
     }
 
-    /// STEP 2 — On tap, present the sheet and await the result. `present(...)`
-    /// is async and returns a single `MolliePaymentResult`.
+    /// STEP 2 — On tap, build a checkout, present modally, and await the
+    /// result. `presentCard(from:)` is async and returns a single
+    /// `MolliePaymentResult`.
     @objc private func payTapped() {
         let token = clientAccessToken
         guard !token.isEmpty else { return }
 
         resultLabel.text = nil
+        // STEP 3 — Construction decodes the token eagerly and throws on a
+        // malformed one.
+        guard let checkout = try? MollieCheckout(clientToken: token) else {
+            resultLabel.text = "Failed: invalid client token"
+            return
+        }
         Task {
-            // STEP 3 — Present from `self`. Theme + production endpoints are
-            // defaulted.
-            let result = await MolliePaymentSheet.present(
-                from: self,
-                clientToken: token
-            )
-            // STEP 4 — Branch on the terminal result.
+            // STEP 4 — Present from `self`. Appearance and production
+            // endpoints are always used — neither has a public override.
+            let result = await checkout.presentCard(from: self)
+            // STEP 5 — Branch on the terminal result.
             switch result {
             case let .completed(payment):
                 resultLabel.text = "Completed: \(payment.amount) \(payment.currency)"

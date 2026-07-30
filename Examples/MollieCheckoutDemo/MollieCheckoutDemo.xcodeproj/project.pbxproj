@@ -16,7 +16,6 @@
 		D10000010000000000000005 /* CardFormExample.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000010000000000000005 /* CardFormExample.swift */; };
 		D10000010000000000000006 /* PaymentSheetUIKitExample.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000010000000000000006 /* PaymentSheetUIKitExample.swift */; };
 		C1000001000000000000000A /* MollieComponents in Frameworks */ = {isa = PBXBuildFile; productRef = C5000001000000000000000A /* MollieComponents */; };
-		C1000001000000000000000B /* MolliePaymentsUI in Frameworks */ = {isa = PBXBuildFile; productRef = C5000001000000000000000B /* MolliePaymentsUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -37,7 +36,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				C1000001000000000000000A /* MollieComponents in Frameworks */,
-				C1000001000000000000000B /* MolliePaymentsUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -93,7 +91,6 @@
 			name = MollieCheckoutDemo;
 			packageProductDependencies = (
 				C5000001000000000000000A /* MollieComponents */,
-				C5000001000000000000000B /* MolliePaymentsUI */,
 			);
 			productName = MollieCheckoutDemo;
 			productReference = C20000010000000000000020 /* MollieCheckoutDemo.app */;
@@ -382,11 +379,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = C0B88B102FBB32720093AE9B /* XCLocalSwiftPackageReference "MollieComponents" */;
 			productName = MollieComponents;
-		};
-		C5000001000000000000000B /* MolliePaymentsUI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = C0B88B102FBB32720093AE9B /* XCLocalSwiftPackageReference "MollieComponents" */;
-			productName = MolliePaymentsUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

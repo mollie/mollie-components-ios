@@ -8,11 +8,11 @@
     final class CardFormViewControllerTests: XCTestCase {
         func test_init_acceptsDefaultTheme() {
             let form = MollieCardFormViewController()
-            XCTAssertEqual(form.theme.colors.primary, MolliePaymentTheme.Colors.default.primary)
+            XCTAssertEqual(form.theme.colors.primary, MollieAppearance.Colors.default.primary)
         }
 
         func test_init_retainsCustomTheme() {
-            let customColors = MolliePaymentTheme.Colors(
+            let customColors = MollieAppearance.Colors(
                 primary: .init(red: 0.1, green: 0.2, blue: 0.3, alpha: 1.0),
                 background: .init(red: 0, green: 0, blue: 0, alpha: 1),
                 field: .init(red: 0, green: 0, blue: 0, alpha: 1),
@@ -20,7 +20,7 @@
                 text: .init(red: 0, green: 0, blue: 0, alpha: 1),
                 error: .init(red: 0, green: 0, blue: 0, alpha: 1)
             )
-            let theme = MolliePaymentTheme(colors: customColors, typography: .default)
+            let theme = MollieAppearance(colors: customColors, typography: .default)
             let form = MollieCardFormViewController(theme: theme)
             XCTAssertEqual(form.theme.colors.primary.red, 0.1, accuracy: 0.0001)
         }
@@ -34,6 +34,44 @@
             XCTAssertTrue(form.expiryField.isDescendant(of: form.view))
             XCTAssertTrue(form.cvcField.isDescendant(of: form.view))
             XCTAssertTrue(form.payButton.isDescendant(of: form.view))
+        }
+
+        // MARK: - Embedded (SwiftUI) sizing
+
+        func test_systemLayoutSizeFitting_heightStable_beforeAndAfterViewWillAppear() {
+            // Regression: SwiftUI's `sizeThatFits` forces `viewDidLoad` (via
+            // lazy `view` access) but never calls `viewWillAppear` before
+            // freezing the embedded container to the measured height. If
+            // theme application were deferred to `viewWillAppear`, the
+            // measured height would stop matching the final themed layout —
+            // Auto Layout resolves that mismatch by compressing the lowest-
+            // priority breakable content (the section header labels) toward
+            // zero height. Theme is an immutable `let`, so applying it in
+            // `viewDidLoad` instead is behavior-neutral and keeps these two
+            // measurements equal.
+            let form = MollieCardFormViewController(theme: .default)
+            let targetWidth: CGFloat = 343
+
+            func fittingHeight() -> CGFloat {
+                form.view.systemLayoutSizeFitting(
+                    CGSize(width: targetWidth, height: UIView.layoutFittingCompressedSize.height),
+                    withHorizontalFittingPriority: .required,
+                    verticalFittingPriority: .fittingSizeLevel
+                ).height
+            }
+
+            let before = fittingHeight()
+            form.viewWillAppear(false)
+            let after = fittingHeight()
+
+            XCTAssertEqual(
+                before, after, accuracy: 0.5,
+                """
+                Theme must not change the natural fitting height after SwiftUI's \
+                one-shot pre-appear measurement, or the embedded form's section \
+                header labels get compressed toward zero height.
+                """
+            )
         }
 
         func test_submitButton_emitsSnapshotWithRawText() {
@@ -158,10 +196,11 @@
             // Failure path: validator rejects, `updateSubmitState` flips
             // the button back to whatever the form's validity says — here
             // the missing cardholder means it stays disabled, but the
-            // grouped view should show an inline error (proof we hit the
-            // failure branch, not a stuck disable from pre-validation).
+            // grouped view should show the per-field caption (Phase B3;
+            // proof we hit the failure branch, not a stuck disable from
+            // pre-validation).
             XCTAssertEqual(
-                form.groupedFormView?.currentErrorMessageForTesting,
+                form.groupedFormView?.fieldErrorTextForTesting(.cardholder),
                 CardFormValidator.ValidationError.missingCardholder.userMessage
             )
         }
@@ -217,6 +256,266 @@
                 _ = target.perform(action)
             }
             XCTAssertTrue(cancelled)
+        }
+
+        // MARK: - Per-field validation UX (Phase B3)
+
+        //
+        // `sendActions(for: .editingChanged / .editingDidEnd)` doesn't
+        // reliably fire target-action in this repo's headless UIKit test
+        // harness (see the brand-detection tests' `updateBrand(forPAN:)`
+        // seam for precedent), so these drive the directly-callable
+        // `validateAndDisplayAll()` / `validateAndDisplayField(_:)` /
+        // `clearFieldErrorIfResolved(_:)` methods instead of the real
+        // field events.
+
+        func test_validateAndDisplayAll_allValid_returnsTrueAndClearsFieldErrors() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardholderField.text = "Ada Lovelace"
+            form.cardNumberField.text = "4242424242424242"
+            form.expiryField.text = "12/30"
+            form.cvcField.text = "123"
+
+            XCTAssertTrue(form.validateAndDisplayAll())
+            for field: CardField in [.cardholder, .pan, .expiry, .cvc] {
+                XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(field))
+            }
+        }
+
+        func test_validateAndDisplayAll_multipleInvalidFields_showsEveryFieldCaptionAndFocusesFirst() {
+            // Web-SDK-aligned submit UX: show every problem at once (not
+            // just the first, which is `updateSubmitState`'s job for the
+            // live button gate), and focus the FIRST invalid field.
+            let form = MollieCardFormViewController()
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 568))
+            window.rootViewController = form
+            window.makeKeyAndVisible()
+            form.loadViewIfNeeded()
+            // Cardholder empty, PAN too short, expiry blank, CVC empty —
+            // every field fails.
+            form.cardNumberField.text = "123"
+
+            XCTAssertFalse(form.validateAndDisplayAll())
+            XCTAssertEqual(
+                form.groupedFormView?.fieldErrorTextForTesting(.cardholder),
+                CardFormValidator.ValidationError.missingCardholder.userMessage
+            )
+            XCTAssertEqual(
+                form.groupedFormView?.fieldErrorTextForTesting(.pan),
+                CardFormValidator.ValidationError.panTooShort.userMessage
+            )
+            XCTAssertNotNil(form.groupedFormView?.fieldErrorTextForTesting(.expiry))
+            XCTAssertNotNil(form.groupedFormView?.fieldErrorTextForTesting(.cvc))
+            XCTAssertTrue(
+                form.cardholderField.isFirstResponder,
+                "Must focus the FIRST invalid field, per validateAll's cardholder/pan/expiry/cvc ordering"
+            )
+        }
+
+        func test_validateAndDisplayAll_invalid_postsAccessibilityAnnouncementSummarizingErrors() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            var announced: String?
+            form.accessibilityAnnouncer = { announced = $0 }
+
+            XCTAssertFalse(form.validateAndDisplayAll())
+
+            let expected = CardFormValidator.validateAll(snapshot: CardFormSnapshot(
+                cardholderName: "",
+                cardNumber: "",
+                expiry: "",
+                cvc: ""
+            )).map(\.userMessage).joined(separator: " ")
+            XCTAssertEqual(announced, expected)
+        }
+
+        func test_validateAndDisplayAll_valid_doesNotPostAnnouncement() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardholderField.text = "Ada Lovelace"
+            form.cardNumberField.text = "4242424242424242"
+            form.expiryField.text = "12/30"
+            form.cvcField.text = "123"
+            var announced: String?
+            form.accessibilityAnnouncer = { announced = $0 }
+
+            XCTAssertTrue(form.validateAndDisplayAll())
+            XCTAssertNil(announced, "A valid submit must never post a VoiceOver announcement")
+        }
+
+        func test_validateAndDisplayField_blurWithInvalidValue_showsOnlyThatFieldCaption() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            // Every other field valid so we can prove only `.pan` gets a
+            // caption from validating `.pan`.
+            form.cardholderField.text = "Ada Lovelace"
+            form.expiryField.text = "12/30"
+            form.cvcField.text = "123"
+            form.cardNumberField.text = "123"
+
+            form.validateAndDisplayField(.pan)
+
+            XCTAssertEqual(
+                form.groupedFormView?.fieldErrorTextForTesting(.pan),
+                CardFormValidator.ValidationError.panTooShort.userMessage
+            )
+            XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(.cardholder))
+            XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(.expiry))
+            XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(.cvc))
+        }
+
+        func test_validateAndDisplayField_validValue_clearsThatFieldCaption() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardNumberField.text = "123"
+            form.validateAndDisplayField(.pan)
+            XCTAssertNotNil(form.groupedFormView?.fieldErrorTextForTesting(.pan))
+
+            form.cardNumberField.text = "4242424242424242"
+            form.validateAndDisplayField(.pan)
+
+            XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(.pan))
+        }
+
+        func test_validateAndDisplayField_doesNotClobberOtherFieldsCaptions() {
+            // Merge-not-replace requirement: validating one field on blur
+            // must not wipe out a caption another field is already showing.
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardNumberField.text = "123"
+            form.validateAndDisplayField(.pan)
+            XCTAssertNotNil(form.groupedFormView?.fieldErrorTextForTesting(.pan))
+
+            form.cvcField.text = "1"
+            form.validateAndDisplayField(.cvc)
+
+            XCTAssertNotNil(
+                form.groupedFormView?.fieldErrorTextForTesting(.pan),
+                "Validating .cvc must not clear .pan's already-shown caption"
+            )
+            XCTAssertNotNil(form.groupedFormView?.fieldErrorTextForTesting(.cvc))
+        }
+
+        func test_clearFieldErrorIfResolved_fieldWithNoDisplayedError_doesNotIntroduceOne() {
+            // Guard clause: the per-keystroke path must only ever touch a
+            // field that already HAS a displayed caption — it must never
+            // introduce a new one while the user is still typing.
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardNumberField.text = "123" // invalid, but never blurred/submitted
+
+            form.clearFieldErrorIfResolved(.pan)
+
+            XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(.pan))
+        }
+
+        func test_clearFieldErrorIfResolved_resolvedField_clearsCaption() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardNumberField.text = "123"
+            form.validateAndDisplayField(.pan)
+            XCTAssertNotNil(form.groupedFormView?.fieldErrorTextForTesting(.pan))
+
+            form.cardNumberField.text = "4242424242424242"
+            form.clearFieldErrorIfResolved(.pan)
+
+            XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(.pan))
+        }
+
+        func test_clearFieldErrorIfResolved_stillInvalid_leavesCaptionShown() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardNumberField.text = "123"
+            form.validateAndDisplayField(.pan)
+
+            form.cardNumberField.text = "1234" // still too short
+            form.clearFieldErrorIfResolved(.pan)
+
+            XCTAssertNotNil(
+                form.groupedFormView?.fieldErrorTextForTesting(.pan),
+                "Per-keystroke path must not clear a caption whose field is still invalid"
+            )
+        }
+
+        func test_handleSubmit_success_clearsStaleFieldCaptionFromAPriorFailedSubmit() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            // First tap fails (empty cardholder) and paints its caption.
+            form.cardNumberField.text = "4242424242424242"
+            form.expiryField.text = "12/30"
+            form.cvcField.text = "123"
+            form.payButton.sendTapForTesting()
+            XCTAssertNotNil(form.groupedFormView?.fieldErrorTextForTesting(.cardholder))
+
+            // Fix it and resubmit — the stale caption must clear on success.
+            form.cardholderField.text = "Ada Lovelace"
+            form.payButton.sendTapForTesting()
+
+            XCTAssertNil(form.groupedFormView?.fieldErrorTextForTesting(.cardholder))
+        }
+
+        // MARK: - Per-field event
+
+        //
+        // `fireFieldEvent(for:)` is `package` (not `private`) for the same
+        // reason `validateAndDisplayField(_:)`/`clearFieldErrorIfResolved(_:)`
+        // are — see this file's header comment on why `sendActions(for:)`
+        // isn't a reliable driver here. These tests call it directly and
+        // assert the `CardFieldEvent` handed to `onFieldEvent`.
+
+        func test_fireFieldEvent_validField_reportsIsValidTrueAndNoError() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardholderField.text = "Ada Lovelace"
+            var captured: CardFieldEvent?
+            form.onFieldEvent = { captured = $0 }
+
+            form.fireFieldEvent(for: .cardholder)
+
+            XCTAssertEqual(captured?.field, .cardholder)
+            XCTAssertEqual(captured?.isValid, true)
+            XCTAssertNil(captured?.error)
+        }
+
+        func test_fireFieldEvent_invalidField_reportsIsValidFalseAndErrorKind() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardNumberField.text = "123"
+            var captured: CardFieldEvent?
+            form.onFieldEvent = { captured = $0 }
+
+            form.fireFieldEvent(for: .pan)
+
+            XCTAssertEqual(captured?.field, .pan)
+            XCTAssertEqual(captured?.isValid, false)
+            XCTAssertEqual(captured?.error, .panTooShort)
+        }
+
+        func test_fireFieldEvent_reportsDetectedSchemeFromCardNumberField() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            form.cardNumberField.text = "4242424242424242"
+            var captured: CardFieldEvent?
+            form.onFieldEvent = { captured = $0 }
+
+            // Every field's event carries the detected scheme, not only
+            // `.pan`'s — proves a host doesn't need to separately watch the
+            // card-number field just to read it.
+            form.fireFieldEvent(for: .cvc)
+
+            XCTAssertEqual(captured?.detectedScheme, .visa)
+        }
+
+        func test_fireFieldEvent_noCardNumber_reportsNilDetectedScheme() {
+            let form = MollieCardFormViewController()
+            form.loadViewIfNeeded()
+            var captured: CardFieldEvent?
+            form.onFieldEvent = { captured = $0 }
+
+            form.fireFieldEvent(for: .cardholder)
+
+            XCTAssertNil(captured?.detectedScheme)
         }
     }
 

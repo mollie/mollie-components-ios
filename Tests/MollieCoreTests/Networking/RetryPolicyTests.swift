@@ -47,7 +47,7 @@ final class RetryPolicyTests: XCTestCase {
 
     func test_shouldRetry_false_whenServerError5xxAndNonIdempotent() {
         // The charging-POST guard: a 5xx on POST/PATCH must NEVER auto-retry,
-        // since there is no server-honoured dedup (spike #316, Model B).
+        // since there is no server-honoured dedup (Model B).
         XCTAssertFalse(policy.shouldRetry(attempt: 0, error: MollieError.api(.serverError(503)), isIdempotent: false))
     }
 

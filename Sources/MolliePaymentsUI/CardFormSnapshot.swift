@@ -2,10 +2,11 @@ import Foundation
 
 /// Raw, unvalidated snapshot of what the user has entered in the card form.
 ///
-/// MR4 emits this as-typed: PAN with whatever spacing the user inserted,
-/// expiry as the raw `MM/YY` string, CVC and cardholder name as-typed. MR5
-/// layers Luhn, expiry parsing, and CVC length-by-scheme on top before this
-/// shape becomes a `CardSubmissionData` for the coordinator.
+/// This type is emitted as-typed: PAN with whatever spacing the user
+/// inserted, expiry as the raw `MM/YY` string, CVC and cardholder name
+/// as-typed. Validation (Luhn, expiry parsing, and CVC length-by-scheme) is
+/// layered on top before this shape becomes a `CardSubmissionData` for the
+/// coordinator.
 ///
 /// PCI: the PAN and CVC fields are sensitive cardholder data. The host
 /// coordinator MUST call `zero()` after it has finished consuming the
@@ -59,5 +60,18 @@ package struct CardFormSnapshot: Equatable {
     package mutating func zero() {
         cardNumber = ""
         cvc = ""
+    }
+}
+
+/// Belt-and-braces: the snapshot holds the raw PAN, CVC, cardholder name and
+/// expiry. Any reflection-based dump (`String(describing:)`, `String(reflecting:)`,
+/// `dump(_:)`, the Swift runtime's default `print` of a struct, third-party
+/// crash reporters that auto-mirror locals) would otherwise emit the cleartext
+/// fields. Conforming to `CustomDebugStringConvertible` forces a fixed redacted
+/// string regardless of how the struct is rendered. Mirrors
+/// `TokenizeRequest.debugDescription`.
+extension CardFormSnapshot: CustomDebugStringConvertible {
+    package var debugDescription: String {
+        "CardFormSnapshot(redacted)"
     }
 }

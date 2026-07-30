@@ -1,16 +1,15 @@
 import MollieComponents
-import MolliePaymentsUI
 import SwiftUI
 
 /// Entry point for the Mollie checkout sample app.
 ///
 /// This is a minimal reference sample showing how to integrate the
-/// Mollie Components SDK from a merchant app. It links only the two public
-/// SDK products a merchant needs:
+/// Mollie Components SDK from a merchant app. It links only the one public
+/// SDK product a merchant needs:
 ///
 /// - `MollieComponents` — the payment-sheet and card-form surfaces plus
-///   the ``MolliePaymentResult`` type.
-/// - `MolliePaymentsUI` — the ``MolliePaymentTheme`` used to brand them.
+///   the ``MolliePaymentResult`` type. Appearance has no public override —
+///   every surface always renders with Mollie's branded default theme.
 ///
 /// A real merchant obtains a `clientAccessToken` from their own backend
 /// (which in turn calls Mollie). The example screens accept a pasted token

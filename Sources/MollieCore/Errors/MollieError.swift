@@ -18,7 +18,7 @@ public enum MollieError: Error {
     /// exhausted. Charging POSTs (card tokenisation, checkout-attempt
     /// creation) are **never** auto-retried — they surface on the first
     /// transport failure, since the outcome is indeterminate and no
-    /// server-honoured dedup exists (spike #316, Model B).
+    /// server-honoured dedup exists (Model B).
     ///
     /// > Tip: Transient. Prompt the cardholder to check their connection
     /// > and try again; inspect `URLError.code` for the specifics.
@@ -179,7 +179,7 @@ public enum MollieError: Error {
         /// existed, or the base URL/path is wrong.
         ///
         /// > Important: Confirm the token is current and the
-        /// > `MolliePaymentEndpoints` are correct; otherwise create a new
+        /// > `MollieEndpoints` are correct; otherwise create a new
         /// > session.
         case notFound
 
@@ -226,7 +226,7 @@ public enum MollieError: Error {
         /// with jittered backoff for idempotent ops only. A charging POST is
         /// **never** auto-retried on `5xx` — the outcome is indeterminate, so
         /// it surfaces for server-side reconciliation before any re-charge
-        /// (spike #316, Model B). An unexpected `4xx` is likely an integration
+        /// (Model B). An unexpected `4xx` is likely an integration
         /// issue — contact support with the code.
         ///
         /// - Parameter code: The HTTP status code that was returned.

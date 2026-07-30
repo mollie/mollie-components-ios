@@ -16,7 +16,7 @@ final class IINLookupServiceTests: XCTestCase {
 
     func test_lookup_atLeast6digits_returnsResult() async {
         let mock = MockHTTPClient()
-        let expected = IINResult(scheme: .visa, cardType: .credit, issuingCountry: "NL")
+        let expected = IINResult(schemes: [.visa], cardType: .credit, issuingCountry: "NL")
         mock.enqueue(expected)
         let service = IINLookupService(httpClient: mock, debounceInterval: 0.01)
 
@@ -28,7 +28,7 @@ final class IINLookupServiceTests: XCTestCase {
 
     func test_lookup_debounces_rapidCalls() async {
         let mock = MockHTTPClient()
-        let expected = IINResult(scheme: .visa, cardType: .credit, issuingCountry: "NL")
+        let expected = IINResult(schemes: [.visa], cardType: .credit, issuingCountry: "NL")
         mock.enqueueRepeating(expected)
         let service = IINLookupService(httpClient: mock, debounceInterval: 0.05)
 

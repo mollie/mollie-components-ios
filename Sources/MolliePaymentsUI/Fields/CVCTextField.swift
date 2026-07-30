@@ -1,8 +1,8 @@
 #if canImport(UIKit)
     import UIKit
 
-    /// CVC field. MR4 ships the bare subclass; MR5 attaches scheme-aware
-    /// length validation (3 for Visa/MC, 4 for Amex, fallback 4 on stale).
+    /// CVC field with scheme-aware length validation (3 for Visa/MC, 4 for
+    /// Amex, fallback 4 on stale).
     package final class CVCTextField: UITextField {
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -39,11 +39,20 @@
             raw.filter { $0.isASCII && $0.isNumber }
         }
 
+        /// Strips non-digits and hard-caps at 4 — the longest CVC any
+        /// scheme issues (Amex). No scheme needs fewer than 3, so a fixed
+        /// cap (rather than brand-aware length like the PAN field) is
+        /// enough: the field never blocks a valid 3-digit entry, it just
+        /// refuses a 5th digit.
+        package static func format(_ raw: String) -> String {
+            String(digitsOnly(raw).prefix(4))
+        }
+
         @objc private func sanitize() {
             let raw = text ?? ""
-            let filtered = Self.digitsOnly(raw)
-            guard filtered != raw else { return }
-            text = filtered
+            let formatted = Self.format(raw)
+            guard formatted != raw else { return }
+            text = formatted
             if let endRange = textRange(from: endOfDocument, to: endOfDocument) {
                 selectedTextRange = endRange
             }

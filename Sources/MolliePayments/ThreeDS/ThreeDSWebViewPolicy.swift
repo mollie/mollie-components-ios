@@ -1,5 +1,6 @@
 #if canImport(WebKit)
     import Foundation
+    import MollieCore
     import WebKit
 
     // Pure policy + JS helpers extracted from `ThreeDSWebViewController` so
@@ -202,7 +203,9 @@
     ///   - `www.mollie.com`, `mollie.com` (hosted checkout return / cancel).
     package func threeDSPostMessageAllowedHosts(challengeURL: URL) -> [String] {
         var hosts: [String] = []
-        if let host = challengeURL.host?.lowercased(), !host.isEmpty { hosts.append(host) }
+        if let host = challengeURL.host?.lowercased(), !host.isEmpty {
+            hosts.append(host)
+        }
         for known in [
             "secure-3ds.mollie.com",
             "pay.mollie.nl",
@@ -226,7 +229,7 @@
     ///
     /// CONTRACT: the JS function relies on exact host equality only. Do not
     /// add `endsWith()` / `indexOf(.) !== 0` style matches here — they re-
-    /// introduce the wildcard-subdomain bypass we removed in FIX #12. Any
+    /// introduce the wildcard-subdomain bypass we previously removed. Any
     /// new Mollie host that needs to postMessage must be added to
     /// `threeDSPostMessageAllowedHosts(challengeURL:)` instead.
     package func makeThreeDSBridgeJS(allowedHostsJSON: String) -> String {

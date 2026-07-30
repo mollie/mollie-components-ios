@@ -11,6 +11,10 @@ public struct ClientToken: Decodable {
     public let profileToken: String
     public let merchantProfileName: String?
     public let organizationCountryCode: String?
+    /// Client-safe Pusher connection block forwarded by the backend:
+    /// app `key`, `cluster`, resolved `channel` name, and
+    /// `event` name. Absent when Pusher isn't enabled for the session.
+    public let pusherConfiguration: PusherConfiguration?
     private let enabledFeatures: [String]
 
     public var isPusherEnabled: Bool {
@@ -25,6 +29,7 @@ public struct ClientToken: Decodable {
         case profileToken
         case merchantProfileName
         case organizationCountryCode
+        case pusherConfiguration
         case enabledFeatures = "_enabledFeatures"
     }
 
@@ -37,6 +42,12 @@ public struct ClientToken: Decodable {
         profileToken = try container.decode(String.self, forKey: .profileToken)
         merchantProfileName = try container.decodeIfPresent(String.self, forKey: .merchantProfileName)
         organizationCountryCode = try container.decodeIfPresent(String.self, forKey: .organizationCountryCode)
+        // A malformed or partial `pusherConfiguration` must NOT fail the whole
+        // token: the real-time doorbell is best-effort and HTTP polling covers
+        // its absence. On a backend field drift we degrade to nil (poll-only)
+        // rather than throwing and blocking the payment. `makeChannelsClient`
+        // applies the same fail-safe for empty fields.
+        pusherConfiguration = try? container.decodeIfPresent(PusherConfiguration.self, forKey: .pusherConfiguration)
         enabledFeatures = try (container.decodeIfPresent([String].self, forKey: .enabledFeatures)) ?? []
     }
 }

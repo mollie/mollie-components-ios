@@ -1,14 +1,14 @@
 # Mollie Checkout Demo
 
-A small sample app that shows how to accept card payments with the Mollie Components iOS SDK from a merchant app. It links only the public SDK products a merchant needs (`MollieComponents` and `MolliePaymentsUI`) and walks through the common integration shapes — a modal payment sheet, an embedded card form, the UIKit entry point, and how to wire in a server-issued client access token.
+A small sample app that shows how to accept card payments with the Mollie Components iOS SDK from a merchant app. It links only the one public SDK product a merchant needs (`MollieComponents`) and walks through the common integration shapes — a modal payment sheet, an embedded card form, the UIKit entry point, and how to wire in a server-issued client access token.
 
 Each example screen is written to be read on its own: open the file, follow the numbered `STEP` comments, and copy the pattern into your own checkout.
 
 ## Features
 
-- **Modal payment sheet (SwiftUI)** — present the SDK card form as a sheet with the `.molliePaymentSheet` modifier.
-- **Embedded card form (SwiftUI)** — drop `MolliePaymentCardFormView` inline into your own checkout layout.
-- **Modal payment sheet (UIKit)** — present the sheet from a `UIViewController` with `MolliePaymentSheet.present(from:)`.
+- **Modal payment sheet (SwiftUI)** — build a `MollieCheckout` and present `MollieCardComponent` in your own `.sheet`.
+- **Embedded card form (SwiftUI)** — drop `MollieCardComponent` inline into your own checkout layout.
+- **Modal payment sheet (UIKit)** — build a `MollieCheckout` and present its card form from a `UIViewController` with `checkout.presentCard(from:)`.
 - **Paste-token flow** — try every flow end-to-end without standing up a backend by pasting a client access token you generated elsewhere.
 - **Result + deep-link handling** — render the typed `MolliePaymentResult` and route a return-URL redirect to a success screen.
 
@@ -36,11 +36,11 @@ That script is exactly the call your own server makes (`POST /v2/sessions` with 
 
 | File | Integration shape |
 |------|-------------------|
-| `Sources/MollieCheckoutDemoApp.swift` | App entry point — links the public SDK products and routes the return-URL redirect to the success screen. |
+| `Sources/MollieCheckoutDemoApp.swift` | App entry point — links the public SDK product and routes the return-URL redirect to the success screen. |
 | `Sources/RootView.swift` | Root menu that navigates to each example. |
-| `Sources/PaymentSheetExample.swift` | SwiftUI modal payment sheet via the `.molliePaymentSheet` modifier. |
-| `Sources/CardFormExample.swift` | Embedded SwiftUI card form via `MolliePaymentCardFormView`. |
-| `Sources/PaymentSheetUIKitExample.swift` | UIKit modal payment sheet via `MolliePaymentSheet.present(from:)`. |
+| `Sources/PaymentSheetExample.swift` | SwiftUI modal payment sheet — `MollieCardComponent` in the host's own `.sheet`. |
+| `Sources/CardFormExample.swift` | Embedded SwiftUI card form via `MollieCardComponent`. |
+| `Sources/PaymentSheetUIKitExample.swift` | UIKit modal payment sheet via `MollieCheckout.presentCard(from:)`. |
 | `Sources/TokenInputView.swift` | Where to wire your server-issued `clientAccessToken` (paste field for the demo; backend fetch reference in the comments). |
 | `Sources/PaymentResultView.swift` | Renders the typed `MolliePaymentResult` (`.completed` / `.failed` / `.cancelled`). |
 | `Sources/CheckoutSuccessView.swift` | Success screen reached via a return-URL redirect (deep-link handling). |

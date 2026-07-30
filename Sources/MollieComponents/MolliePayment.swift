@@ -1,9 +1,8 @@
 /// A successfully completed Mollie payment as surfaced to the merchant.
 ///
-/// Stub for MR1: holds the minimum identifying fields a merchant needs to
-/// reconcile the result with their backend. MR3 wires the real mapping
-/// from `SessionResponse`; additional fields (status, method, metadata)
-/// will be added there as needed and on demand.
+/// Holds the minimum identifying fields a merchant needs to reconcile the
+/// result with their backend, mapped from `SessionResponse`; additional
+/// fields (status, method, metadata) will be added as needed and on demand.
 public struct MolliePayment: Sendable, Equatable {
     /// Session token (the `sessionToken` returned by the Sessions Service
     /// on the completed session). This is the merchant's reconciliation

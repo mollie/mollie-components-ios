@@ -16,8 +16,9 @@ import XCTest
 /// the genuine `TokenizerEndpoint.tokenize(...)` through the real
 /// `TokenizerClient` (backed by a `URLProtocol` mock) and asserts a single
 /// attempt. It turns red if `tokenize`'s HTTP method ever stops being POST or
-/// if POST ever becomes idempotent. See decisions-log "2026-06-23 — Network
-/// idempotency model decided (spike #316 resolved)".
+/// if POST ever becomes idempotent — neither the Sessions Service nor the
+/// PCI Tokeniser honours an inbound idempotency key, so retrying the
+/// charging POST risks a duplicate charge.
 final class TokenizerEndpointRetryGuardTests: XCTestCase {
     private let baseURL = URL(string: "https://api.cc.mollie.com") ?? URL(fileURLWithPath: "/")
 

@@ -1,6 +1,5 @@
 #if canImport(UIKit) && canImport(WebKit)
     import MollieCore
-    import Network
     import UIKit
     import WebKit
 
@@ -218,7 +217,9 @@
             let delay = revealPolicy.revealInterval
             revealTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                if Task.isCancelled { return }
+                if Task.isCancelled {
+                    return
+                }
                 self?.surface()
             }
         }
@@ -229,7 +230,11 @@
         /// A no-op once the flow has resolved.
         private func surface() {
             guard !resolved else { return }
-            if presentOnDemand { requestPresentation() } else { revealWebView() }
+            if presentOnDemand {
+                requestPresentation()
+            } else {
+                revealWebView()
+            }
         }
 
         /// Present-on-demand: surface the off-screen-hosted controller. Single-shot.
@@ -248,7 +253,9 @@
             guard !revealed, !resolved else { return }
             revealed = true
             webView?.accessibilityElementsHidden = false
-            if let webView { UIAccessibility.post(notification: .screenChanged, argument: webView) }
+            if let webView {
+                UIAccessibility.post(notification: .screenChanged, argument: webView)
+            }
             guard let cover = coverView else { return }
             coverView = nil
             UIView.animate(withDuration: 0.2, animations: {
@@ -354,13 +361,17 @@
             let nsError = error as NSError
             // -999 is NSURLErrorCancelled — happens when we cancel the redirect
             // ourselves via `decisionHandler(.cancel)` above. Don't double-resolve.
-            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+                return
+            }
             resolve(.failed(reason: .sdkError(message: "navigation_error_\(nsError.code)")))
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation?, withError error: Error) {
             let nsError = error as NSError
-            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled {
+                return
+            }
             resolve(.failed(reason: .sdkError(message: "navigation_error_\(nsError.code)")))
         }
     }

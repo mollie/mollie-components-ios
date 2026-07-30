@@ -9,5 +9,5 @@ import Foundation
 /// that don't import UIKit. The concrete UIKit implementation
 /// (`UINavigationChallengeContainer`) is platform-guarded and lives next to
 /// `ThreeDSCoordinator`.
-/// Made public for demo target access; will be re-evaluated when MollieComponents umbrella ships in Phase 4.
+/// Made public for demo target access; will be re-evaluated once the `MollieComponents` umbrella target ships.
 public protocol ChallengeContainer: AnyObject, Sendable {}

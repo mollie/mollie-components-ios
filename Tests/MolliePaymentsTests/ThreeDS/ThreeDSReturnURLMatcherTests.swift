@@ -22,7 +22,7 @@ final class ThreeDSReturnURLMatcherTests: XCTestCase {
     // MARK: - Production host allow-list
 
     func test_matches_apiMollieCom_isNotInProductionAllowList() throws {
-        // FIX #9: `api.mollie.com` used to be in the prod allow-list "for test
+        // `api.mollie.com` used to be in the prod allow-list "for test
         // fixtures." It must not be — the canonical 3DS return host is
         // `secure-3ds.mollie.com`. Production matcher rejects it.
         let url = try XCTUnwrap(URL(string: "https://api.mollie.com/3ds/return?status=authenticated"))
@@ -38,7 +38,7 @@ final class ThreeDSReturnURLMatcherTests: XCTestCase {
         }
     #endif
 
-    // MARK: - Path matching (FIX #10)
+    // MARK: - Path matching
 
     func test_matches_exactReturnPath_returnsTrue() throws {
         let url = try XCTUnwrap(URL(string: "https://secure-3ds.mollie.com/3ds/return"))

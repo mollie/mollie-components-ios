@@ -4,12 +4,12 @@
     @testable import MolliePayments
 
     /// Unit tests for the pure policy + JS-bridge helpers extracted from
-    /// `ThreeDSWebViewController` (FIX #26 / FIX #12). Gated on WebKit only
+    /// `ThreeDSWebViewController`. Gated on WebKit only
     /// (not UIKit) so the assertions run on macOS as well as iOS — the
     /// controller class itself stays UIKit-only and its `deinit` test lives
     /// further down behind the stricter gate.
     final class ThreeDSWebViewPolicyTests: XCTestCase {
-        // MARK: - FIX #26: threeDSWebViewPolicy(for:…) extracted helper
+        // MARK: - threeDSWebViewPolicy(for:…) extracted helper
 
         private let returnMatcher = ThreeDSReturnURLMatcher()
         private let cancelMatcher = MollieHostedCheckoutCancelMatcher()
@@ -86,7 +86,7 @@
         }
 
         func test_policy_mainFrameNavToHostedCancel1008_cancelsAndResolvesCancelled() throws {
-            // FIX #18 guard relies on FIX #26 wiring — verify the chain end-to-end.
+            // Verify the hosted-checkout-cancel guard chain end-to-end.
             let url = try XCTUnwrap(URL(string: "https://www.mollie.com/checkout/credit-card/return?error_code=1008"))
             let decision = threeDSWebViewPolicy(
                 for: url,
@@ -101,7 +101,7 @@
         }
 
         func test_policy_mainFrameNavToHostedCancelEmptyErrorCode_allows() throws {
-            // FIX #18: empty `?error_code=` must NOT match the cancel matcher
+            // Empty `?error_code=` must NOT match the cancel matcher
             // — otherwise the WebView would dismiss with a useless
             // `mollie_error_` token. With the matcher returning false, the
             // policy helper must fall through to `.allow`.
@@ -287,7 +287,7 @@
             XCTAssertNil(decision.openExternalURL)
         }
 
-        // MARK: - FIX #12: postMessage allow-list generation
+        // MARK: - postMessage allow-list generation
 
         func test_postMessageAllowedHosts_includesAllExpectedRelayHosts() throws {
             let challengeURL = try XCTUnwrap(URL(string: "https://acs.bank.example/challenge"))
@@ -314,7 +314,7 @@
         }
 
         func test_makeBridgeJS_containsExplicitHosts_andNoWildcard() throws {
-            // FIX #12: the wildcard `.mollie.com` endsWith check is GONE. The
+            // The wildcard `.mollie.com` endsWith check is GONE. The
             // generated JS must reference each trusted host literally and use
             // `indexOf` against the allow-list, NOT a substring/suffix check.
             let challengeURL = try XCTUnwrap(URL(string: "https://acs.bank.example/challenge"))
@@ -652,8 +652,12 @@
 
         private static func firstButton(in view: UIView) -> UIButton? {
             for sub in view.subviews {
-                if let button = sub as? UIButton { return button }
-                if let found = firstButton(in: sub) { return found }
+                if let button = sub as? UIButton {
+                    return button
+                }
+                if let found = firstButton(in: sub) {
+                    return found
+                }
             }
             return nil
         }

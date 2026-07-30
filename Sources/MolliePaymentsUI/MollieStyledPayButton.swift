@@ -126,7 +126,7 @@
             }
         }
 
-        package func applyTheme(_ theme: MolliePaymentTheme) {
+        package func applyTheme(_ theme: MollieAppearance) {
             button.backgroundColor = theme.colors.primary.uiColor
             button.layer.cornerRadius = theme.cornerRadius
             button.layer.masksToBounds = true

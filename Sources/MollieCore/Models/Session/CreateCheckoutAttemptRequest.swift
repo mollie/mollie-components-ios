@@ -5,6 +5,10 @@ public struct CreateCheckoutAttemptRequest: Encodable, Sendable {
     public let pspToken: String?
     public let wallet: String?
     public let walletToken: String?
+    /// Customer billing/shipping details injected via `MollieCheckout`'s
+    /// `beforeSubmit` hook. Omitted from the wire body when nil (see
+    /// `MollieCustomerDetails`).
+    public let customerDetails: MollieCustomerDetails?
 
     public init(
         paymentMethod: String,
@@ -12,7 +16,8 @@ public struct CreateCheckoutAttemptRequest: Encodable, Sendable {
         fingerprint: DeviceFingerprint,
         pspToken: String?,
         wallet: String?,
-        walletToken: String?
+        walletToken: String?,
+        customerDetails: MollieCustomerDetails? = nil
     ) {
         self.paymentMethod = paymentMethod
         self.checkoutMethod = checkoutMethod
@@ -20,5 +25,6 @@ public struct CreateCheckoutAttemptRequest: Encodable, Sendable {
         self.pspToken = pspToken
         self.wallet = wallet
         self.walletToken = walletToken
+        self.customerDetails = customerDetails
     }
 }

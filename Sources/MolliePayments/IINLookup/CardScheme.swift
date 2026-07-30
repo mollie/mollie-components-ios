@@ -64,4 +64,35 @@ package enum CardScheme: Equatable, Hashable, Codable {
             try container.encode(raw)
         }
     }
+
+    /// Fixed priority used to deterministically collapse a multi-scheme
+    /// detection result (`BINPrefixTable`/`IINResult`'s `Set<CardScheme>`)
+    /// down to the single scheme a caller can display — e.g. the card
+    /// form's brand icon, or the PAN field's grouping/cap, both of which
+    /// can only ever act on one scheme at a time. Order is a deliberate but
+    /// otherwise arbitrary business call (co-badge *display* precedence is
+    /// out of scope here); it only matters for genuine BIN-range overlaps
+    /// `BINPrefixTable` documents (e.g. Discover/UnionPay's shared alliance
+    /// range). `nil` in -> `nil` out (placeholder). Schemes outside the
+    /// priority list (only ever `.other`, since neither `BINPrefixTable`
+    /// nor the wire contract's `IINResult` decoder ever produces one on
+    /// their own) fall back to `schemes.first` rather than dropping the
+    /// result on the floor.
+    ///
+    /// Single home for logic that used to be duplicated between
+    /// `MollieCardFormViewController` (brand icon) and `CardNumberTextField`
+    /// (PAN grouping) — `package` rather than `public` since both call
+    /// sites live inside `MolliePaymentsUI`, which already imports this
+    /// module, and `package` keeps `CardScheme` off the public surface
+    /// (see `PublicSurfaceTests`, which pins the SDK's public API and has
+    /// no reason to ever see this type).
+    package static func primary(from schemes: Set<CardScheme>) -> CardScheme? {
+        let priority: [CardScheme] = [
+            .visa, .mastercard, .amex, .maestro, .discover, .dinersClub, .jcb, .unionPay, .cartesBancaires,
+        ]
+        for candidate in priority where schemes.contains(candidate) {
+            return candidate
+        }
+        return schemes.first
+    }
 }

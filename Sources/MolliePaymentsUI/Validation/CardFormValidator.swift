@@ -1,4 +1,5 @@
 import Foundation
+import MolliePayments
 
 /// Strongly-typed identifier for the offending card-form field. Replaces a
 /// scattering of `"cardholderName"` / `"cardNumber"` string literals that
@@ -13,10 +14,36 @@ package enum CardField: String {
     case cvc
 }
 
+/// Snapshot of a single card-form field's live state, delivered by
+/// `MollieCardFormViewController.onFieldEvent` on every edit/blur.
+/// Intentionally undocumented outside the package —
+/// `MollieComponents` maps this to the public `MollieCardFieldEvent`
+/// mirror so merchants never see `CardField`/`CardScheme` directly. Declared
+/// here (not in `MollieCardFormViewController.swift`) so it stays available
+/// on platforms where that file's `#if canImport(UIKit)` gate compiles out.
+package struct CardFieldEvent: Equatable {
+    package let field: CardField
+    package let isValid: Bool
+    package let error: CardFormValidator.ValidationError?
+    package let detectedScheme: CardScheme?
+
+    package init(
+        field: CardField,
+        isValid: Bool,
+        error: CardFormValidator.ValidationError?,
+        detectedScheme: CardScheme?
+    ) {
+        self.field = field
+        self.isValid = isValid
+        self.error = error
+        self.detectedScheme = detectedScheme
+    }
+}
+
 /// Submit-time validation for the card form snapshot. Returns the first
 /// problem (form surfaces it in an alert) or `.success` if every field
-/// passes. Defense-in-depth: `PaymentSheetCoordinator` runs the same
-/// validation after the form's check so a future caller that bypasses
+/// passes. Defense-in-depth: `CardCheckoutRunner.parse(snapshot:)` runs the
+/// same validation after the form's check so a future caller that bypasses
 /// the form still gets a typed failure.
 package enum CardFormValidator {
     package enum ValidationError: Error, Equatable {
@@ -29,7 +56,7 @@ package enum CardFormValidator {
 
         /// Short, merchant-presentable error string. Localisation lands when
         /// the form gets a Localizable.strings table; for now this is the
-        /// canonical English form, sufficient for MR5's alert and any test
+        /// canonical English form, sufficient for the form's alert and any test
         /// assertion that needs to inspect the message verbatim.
         package var userMessage: String {
             switch self {
@@ -75,9 +102,42 @@ package enum CardFormValidator {
     /// can `XCTAssertNil(...)` happy paths and `XCTAssertEqual(..., .x)`
     /// failure cases without dragging in `Result<Void, _>` shenanigans.
     package static func validate(snapshot: CardFormSnapshot) -> ValidationError? {
+        if let error = cardholderError(snapshot) {
+            return error
+        }
+        if let error = panError(snapshot) {
+            return error
+        }
+        if let error = expiryError(snapshot) {
+            return error
+        }
+        if let error = cvcError(snapshot) {
+            return error
+        }
+        return nil
+    }
+
+    /// Returns every failing field's error, in `cardholder, pan, expiry,
+    /// cvc` order, or `[]` if the snapshot is good to submit. Built for
+    /// the multi-error summary UI, which needs to surface all
+    /// problems at once rather than the single first-failure `validate(_:)`
+    /// exposes to the live submit-button gate.
+    package static func validateAll(snapshot: CardFormSnapshot) -> [ValidationError] {
+        [
+            cardholderError(snapshot),
+            panError(snapshot),
+            expiryError(snapshot),
+            cvcError(snapshot),
+        ].compactMap { $0 }
+    }
+
+    private static func cardholderError(_ snapshot: CardFormSnapshot) -> ValidationError? {
         let trimmedName = snapshot.cardholderName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return .missingCardholder }
+        return nil
+    }
 
+    private static func panError(_ snapshot: CardFormSnapshot) -> ValidationError? {
         // Strip everything that isn't an ASCII digit. The previous
         // `!$0.isWhitespace` filter let through hyphens (from
         // `4242-4242-4242-4242` pastes), NBSPs (clipboard normalisation),
@@ -88,14 +148,24 @@ package enum CardFormValidator {
         let pan = snapshot.cardNumber.filter { $0.isASCII && $0.isNumber }
         // 13 / 19 are the PCI lower / upper bounds for issuer-assigned PANs.
         // Out-of-range catches typos before they cost a tokeniser round-trip.
-        if pan.count < 13 { return .panTooShort }
-        if pan.count > 19 { return .panTooLong }
+        if pan.count < 13 {
+            return .panTooShort
+        }
+        if pan.count > 19 {
+            return .panTooLong
+        }
         guard Luhn.isValid(pan) else { return .panFailsLuhn }
+        return nil
+    }
 
+    private static func expiryError(_ snapshot: CardFormSnapshot) -> ValidationError? {
         if case let .failure(reason) = ExpiryParser.parse(snapshot.expiry) {
             return .expiry(reason)
         }
+        return nil
+    }
 
+    private static func cvcError(_ snapshot: CardFormSnapshot) -> ValidationError? {
         let cvc = snapshot.cvc.filter { !$0.isWhitespace }
         // 3 (Visa/MC) or 4 (Amex) — IIN-driven precise length lands when the
         // form gets IIN integration in a follow-up. Until then, accept both.
@@ -104,7 +174,6 @@ package enum CardFormValidator {
         if cvc.count < 3 || cvc.count > 4 || !cvc.allSatisfy({ $0.isASCII && $0.isNumber }) {
             return .cvcWrongLength
         }
-
         return nil
     }
 }

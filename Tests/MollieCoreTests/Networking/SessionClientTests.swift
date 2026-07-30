@@ -205,7 +205,7 @@ final class SessionClientTests: XCTestCase {
 
     func test_serverError503_onNonIdempotentPost_doesNotRetry() async {
         // GUARD: a 5xx on the charging POST must be single-attempt — no
-        // server-honoured dedup exists (spike #316, Model B), so an auto-retry
+        // server-honoured dedup exists (Model B), so an auto-retry
         // risks a duplicate authorization.
         var callCount = 0
         MockURLProtocol.handler = { _ in
@@ -249,7 +249,7 @@ final class SessionClientTests: XCTestCase {
         XCTAssertEqual(callCount, 3) // original + 2 retries on 429
     }
 
-    // MARK: - Idempotency contract (epic 315 / spike #316, Model B)
+    // MARK: - Idempotency contract (Model B)
 
     //
     // GUARD TESTS — these pin the no-header / no-auto-retry contract for the
@@ -257,9 +257,8 @@ final class SessionClientTests: XCTestCase {
     // excluded from `isIdempotent` (SessionClient.swift) and the SDK emits no
     // idempotency header. The point is regression protection — a future change
     // that auto-retries createCheckoutAttempt or adds an idempotency header
-    // (which neither the Sessions Service nor the PCI tokeniser honours, per
-    // spike #316) turns these red. See decisions-log "2026-06-23 — Network
-    // idempotency model decided (spike #316 resolved)".
+    // (which neither the Sessions Service nor the PCI Tokeniser honours) turns
+    // these red.
 
     func test_createCheckoutAttempt_urlError_doesNotRetry_chargingPostNotIdempotent() async {
         // A transient retryable URLError on the charging POST must result in
@@ -295,7 +294,7 @@ final class SessionClientTests: XCTestCase {
 
     func test_createCheckoutAttempt_emitsNoIdempotencyHeader() async throws {
         // Neither the Sessions Service nor the tokeniser honours an inbound
-        // idempotency key (spike #316). Assert the deliberate ABSENCE so a
+        // idempotency key. Assert the deliberate ABSENCE so a
         // future well-meaning addition — which would give false duplicate-
         // charge protection — is caught here.
         MockURLProtocol.handler = { request in

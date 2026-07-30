@@ -17,7 +17,18 @@ build_platform() {
         -derivedDataPath "$DERIVED_DATA" \
         -configuration Release \
         BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-        CODE_SIGNING_ALLOWED=NO
+        CODE_SIGNING_ALLOWED=NO \
+        OTHER_SWIFT_FLAGS='$(inherited) -no-verify-emitted-module-interface'
+    # -no-verify-emitted-module-interface: BUILD_LIBRARY_FOR_DISTRIBUTION emits a
+    # textual .swiftinterface per module and verifies it round-trips. PusherSwift's
+    # transitive dep NWWebSocket fails that verification (Swift bug SR-898/SR-14195):
+    # its module name (NWWebSocket) shadows a same-named class, so the generated
+    # interface references `NWWebSocket.WebSocketConnection` as a member of the class
+    # instead of the module. The binary .swiftmodule compiles fine (plain
+    # `swift build`/`swift test` pass); only the *verification* step breaks, so we
+    # emit the interface but skip the round-trip check. NOTE: the boolean
+    # SWIFT_VERIFY_EMITTED_MODULE_INTERFACE=NO is ignored for SPM dependency targets,
+    # so the raw frontend flag is required; $(inherited) keeps each target's flags.
 }
 
 build_platform "generic/platform=iOS"

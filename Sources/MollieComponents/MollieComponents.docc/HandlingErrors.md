@@ -4,7 +4,7 @@ Map every outcome the payment sheet can hand back to merchant-facing behavior.
 
 ## Overview
 
-Every entry point — ``MolliePaymentSheet``, ``MolliePaymentCardFormView``, and the `molliePaymentSheet(isPresented:clientToken:theme:endpoints:onResult:)` modifier — resolves to a single ``MolliePaymentResult`` with three terminal states:
+Every entry point — ``MollieCheckout``'s `presentCard(from:)` and `makeCardComponent(onResult:)`, and ``MollieCardComponent`` directly — resolves to a single ``MolliePaymentResult`` with three terminal states:
 
 - ``MolliePaymentResult/completed(_:)`` — the payment succeeded; the associated ``MolliePayment`` carries the `sessionToken` you reconcile against your backend.
 - ``MolliePaymentResult/failed(_:)`` — the flow ended in a failure, carrying a `MollieError`.
@@ -36,7 +36,7 @@ The table below covers every `MollieError` case the SDK can deliver in `.failed`
 | `.network(URLError)` | Transport failure before any HTTP response (offline, DNS, TLS, URL-layer timeout). The SDK auto-retries transient transport failures for idempotent reads (GET/PUT/DELETE) only; charging POSTs (tokenisation, checkout-attempt creation) surface on the first failure with an indeterminate outcome. | Transient. Prompt "check your connection and try again"; inspect `URLError.code` for specifics. Re-presenting starts a fresh attempt — for a charging operation, reconcile server-side first rather than blindly re-charging. |
 | `.api(.unauthorized)` (401) | The bearer `clientToken` is missing, expired, or invalid. | Merchant fix: your backend mints a fresh session and hands the new token to the SDK. Not retryable with the same token. |
 | `.api(.forbidden)` (403) | Authenticated but not permitted — wrong profile, payment method not enabled, or test/live mode mismatch. | Configuration fix; refreshing the token won't help. Verify the profile and mode. Contact support if entitlements look correct. |
-| `.api(.notFound)` (404) | Resource missing: the session expired or never existed, or the base URL/path is wrong. | Confirm the token is current and the ``MolliePaymentEndpoints`` are correct; otherwise create a new session. |
+| `.api(.notFound)` (404) | Resource missing: the session expired or never existed, or the base URL/path is wrong. | Confirm the token is current and the ``MollieEndpoints`` are correct; otherwise create a new session. |
 | `.api(.validationFailed([Violation]))` (422) | RFC 7807 field violations — usually bad card input (often rewrapped as `.tokenizationFailed`). | Map each `Violation.name` to a form field and show its `reason` inline. Cardholder-retryable. |
 | `.api(.conflict(retryAfter:))` (409) | A competing or duplicate operation on the session. | The SDK auto-retries idempotent ops only, honouring `retryAfter` when present; a charging POST surfaces immediately (no auto-retry). On a charging operation, reconcile or create a new session rather than re-charging blindly. |
 | `.api(.rateLimited(retryAfter:))` (429) | The request was throttled. | The SDK auto-retries idempotent ops only, honouring `retryAfter` (falling back to jittered exponential backoff); a charging POST surfaces immediately. Don't hard-fail to the cardholder on a 429 from a read — the SDK is already backing off. If it surfaces from a charge, review your call cadence before re-presenting. |

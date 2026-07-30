@@ -65,7 +65,15 @@ import XCTest
             intervals: [TimeInterval] = [0.01],
             totalBudget: TimeInterval = 1.0,
             useCheckoutAttempts: Bool = false,
-            onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil
+            onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil,
+            onEvent: (@Sendable (ChannelEvent) -> Void)? = nil,
+            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil,
+            // Disable the concurrent session-completion poll by default so these
+            // checkout-attempt (CAT) tests exercise the attempt path in isolation,
+            // exactly as they did before observeCardPayment's session poll existed.
+            // A `<= 0` budget makes observeCardPayment fall through to
+            // observeAttempt(...) with no second GET /sessions producer.
+            challengeCompletionBudget: TimeInterval = 0
         ) -> CardPaymentCoordinator {
             CardPaymentCoordinator(
                 sessionsClient: mock,
@@ -78,7 +86,10 @@ import XCTest
                 challengeContainer: StubChallengeContainer(),
                 pollingSchedule: PollingSchedule(intervals: intervals, totalBudget: totalBudget),
                 useCheckoutAttempts: useCheckoutAttempts,
-                onSessionUpdate: onSessionUpdate
+                onSessionUpdate: onSessionUpdate,
+                onEvent: onEvent,
+                beforeSubmit: beforeSubmit,
+                challengeCompletionBudget: challengeCompletionBudget
             )
         }
 
@@ -258,6 +269,95 @@ import XCTest
             XCTAssertEqual(updates[1].status, .known(.completed))
         }
 
+        // MARK: - onEvent (MollieCheckoutEvent bridge) tests
+
+        func test_submit_onEvent_firesSessionUpdatedButNotTerminal() async throws {
+            // `onEvent` is the net-new hook that feeds `MollieCheckout`'s
+            // observable stream (via `CardCheckoutRunner.mapNonTerminalEvent`).
+            // It must fire for the non-terminal `.sessionUpdated` poll tick,
+            // but never for the terminal `.sessionCompleted` — that terminal
+            // event is surfaced exclusively through the coordinator's
+            // returned `CardPaymentResult`, so a checkout's stream never
+            // double-emits its terminal event.
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH response (not surfaced via callback)
+            let intermediate = try decodeSession(openSessionJSON)
+            mock.enqueue(intermediate) // poll #1 → sessionUpdated
+            let completed = try decodeSession(completedSessionJSON)
+            mock.enqueue(completed) // poll #2 → sessionCompleted (terminal)
+
+            let collected = EventsCollector()
+            let coordinator = makeCoordinator(
+                mock: mock,
+                onEvent: { event in collected.append(event) }
+            )
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+            let events = await collected.snapshot
+            XCTAssertEqual(events.count, 1, "Only the non-terminal poll tick should reach onEvent")
+            guard case .sessionUpdated = events[0] else {
+                return XCTFail("Expected .sessionUpdated, got \(events[0])")
+            }
+            XCTAssertFalse(
+                events.contains {
+                    if case .sessionCompleted = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                },
+                "onEvent must never fire for the terminal sessionCompleted"
+            )
+        }
+
+        func test_submit_onEvent_firesThreeDSChallengeReady() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH
+            let challenge = try decodeSession(threeDSChallengeJSON)
+            mock.enqueue(challenge) // poll #1 → threeDSChallengeReady
+            let completed = try decodeSession(completedSessionJSON)
+            mock.enqueue(completed) // poll #2 (post-3DS) → sessionCompleted (terminal)
+
+            let presenter = StubChallengePresenter(result: .authenticated)
+            let collected = EventsCollector()
+            let coordinator = makeCoordinator(
+                mock: mock,
+                challengePresenter: presenter,
+                onEvent: { event in collected.append(event) }
+            )
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+            let events = await collected.snapshot
+            let challengeURLs = events.compactMap { event -> URL? in
+                if case let .threeDSChallengeReady(url) = event {
+                    url
+                } else {
+                    nil
+                }
+            }
+            XCTAssertEqual(challengeURLs, try [XCTUnwrap(URL(string: "https://3ds.example.com/challenge"))])
+            XCTAssertFalse(
+                events.contains {
+                    if case .sessionCompleted = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                },
+                "onEvent must never fire for the terminal sessionCompleted"
+            )
+        }
+
         // MARK: - 3DS-branch tests
 
         func test_submit_3dsChallenge_threadsSessionRedirectUrlIntoPresenter() async throws {
@@ -423,6 +523,188 @@ import XCTest
                 return XCTFail("Expected .cancelled even on cancel-authentication failure, got \(result)")
             }
             XCTAssertEqual(mock.callCount, 4)
+        }
+
+        // MARK: - attemptFailed (retryable soft-decline)
+
+        /// Bare `next_action.action_type: "reset"` (shopper cancelled 3DS)
+        /// must end the current `submit(_:)` call as `.attemptFailed`,
+        /// WITHOUT invoking `PATCH /cancel-authentication` — unlike
+        /// `.cancelled`, the server has already reset the session to
+        /// `CREATED` on its own, so there is nothing left to clean up.
+        func test_submit_attemptFailed_bareReset_returnsAttemptFailedWithoutCancelAuthentication() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH /details
+            let reset = try decodeSession("""
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": { "action_type": "reset" },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """)
+            mock.enqueue(reset)
+
+            let coordinator = makeCoordinator(mock: mock)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .attemptFailed = result else {
+                return XCTFail("Expected .attemptFailed, got \(result)")
+            }
+            // tokenize + PATCH details + poll — no PATCH cancel-authentication.
+            XCTAssertEqual(
+                mock.callCount,
+                3,
+                "attemptFailed must NOT invoke cancel-authentication — the server already reset the session"
+            )
+        }
+
+        /// Per-attempt `next_action.action_type: "error"` with the ad-hoc
+        /// `params.reset == true` marker (declined authorization / failed 3DS
+        /// auth) is the other retryable shape. Must surface the
+        /// synthesized `ProblemDetails` on `.attemptFailed`.
+        func test_submit_attemptFailed_errorWithResetTrue_returnsAttemptFailedWithDetails() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH /details
+            let declined = try decodeSession("""
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": {
+                    "action_type": "error",
+                    "params": { "reset": true, "title": "declined", "detail": "Card declined" }
+                },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """)
+            mock.enqueue(declined)
+
+            let coordinator = makeCoordinator(mock: mock)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case let .attemptFailed(details) = result else {
+                return XCTFail("Expected .attemptFailed, got \(result)")
+            }
+            XCTAssertEqual(details?.detail, "Card declined")
+            XCTAssertEqual(mock.callCount, 3, "attemptFailed must NOT invoke cancel-authentication")
+        }
+
+        /// Same retryable-reset contract on the checkout-attempt (CAT) polling
+        /// path — the per-attempt state map, not the legacy session GET, is
+        /// what's actually polled once `useCheckoutAttempts` is enabled.
+        func test_submit_attemptFailed_checkoutAttemptPath_returnsAttemptFailed() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse(token: "cat_reset"))
+            let resetJSON = """
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": { "action_type": "reset" },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """
+            let resetMap = try makeAttemptMap(sessionJSON: resetJSON, catToken: "cat_reset")
+            mock.enqueue(resetMap)
+
+            let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .attemptFailed = result else {
+                return XCTFail("Expected .attemptFailed, got \(result)")
+            }
+            XCTAssertEqual(mock.callCount, 3, "attemptFailed must NOT invoke cancel-authentication")
+        }
+
+        /// `onEvent` (the `MollieCheckoutEvent` bridge hook) must NOT fire for
+        /// `.attemptFailed` — mirroring `sessionCompleted`/`sessionFailed`,
+        /// it is surfaced exclusively via the returned `CardPaymentResult` so
+        /// `CardCheckoutRunner` doesn't double-report the outcome once it
+        /// wires the real mapping.
+        func test_submit_onEvent_doesNotFireForAttemptFailed() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH /details
+            let intermediate = try decodeSession(openSessionJSON)
+            mock.enqueue(intermediate) // poll #1 → sessionUpdated
+            let reset = try decodeSession("""
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": { "action_type": "reset" },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """)
+            mock.enqueue(reset) // poll #2 → attemptFailed (terminal for this attempt)
+
+            let collected = EventsCollector()
+            let coordinator = makeCoordinator(
+                mock: mock,
+                onEvent: { event in collected.append(event) }
+            )
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .attemptFailed = result else {
+                return XCTFail("Expected .attemptFailed, got \(result)")
+            }
+            let events = await collected.snapshot
+            XCTAssertEqual(events.count, 1, "Only the non-terminal poll tick should reach onEvent")
+            guard case .sessionUpdated = events[0] else {
+                return XCTFail("Expected .sessionUpdated, got \(events[0])")
+            }
+            XCTAssertFalse(
+                events.contains {
+                    if case .attemptFailed = $0 {
+                        true
+                    } else {
+                        false
+                    }
+                },
+                "onEvent must never fire for attemptFailed itself"
+            )
+        }
+
+        /// Mirrors `test_submit_3dsChallenge_pollFailsBeforePresenterResolves_dismissesAndReturnsFailed`
+        /// for the retryable case: a bare `reset` arrives while a 3DS
+        /// challenge presentation is still stranded on screen (frictionless
+        /// hosted 3DS never resolves on its own). The race must dismiss the
+        /// presenter and return `.attemptFailed`, NOT `.failed`.
+        func test_submit_3dsChallenge_attemptFailedArrivesDuringRace_dismissesAndReturnsAttemptFailed() async throws {
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH /details
+
+            let challenge = try decodeSession(threeDSChallengeJSON)
+            mock.enqueue(challenge)
+            let reset = try decodeSession("""
+            {
+                "session_token": "sess_abc123",
+                "status": "open",
+                "next_action": { "action_type": "reset" },
+                "payment_amount": { "amount": "10.00", "currency": "EUR" }
+            }
+            """)
+            mock.enqueue(reset)
+
+            let presenter = NeverResolvingChallengePresenter()
+            let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .attemptFailed = result else {
+                return XCTFail("Expected .attemptFailed, got \(result)")
+            }
+            let dismissCount = await presenter.dismissCallCount
+            XCTAssertEqual(
+                dismissCount,
+                1,
+                "Stranded presentation must be dismissed exactly once when a retryable reset wins the race"
+            )
         }
 
         // MARK: - Stream-end + tokenizer-error regressions
@@ -595,7 +877,7 @@ import XCTest
             }
         }
 
-        // MARK: - PXP-5009: poll-vs-presentation race
+        // MARK: - Poll-vs-presentation race
 
         /// A frictionless hosted 3DS page completes the payment server-side
         /// without ever navigating back to the return URL or firing the
@@ -675,6 +957,79 @@ import XCTest
             )
         }
 
+        /// A buffered `.threeDSChallengeReady`
+        /// re-emission that lands while the first challenge presentation is
+        /// still in flight must NOT trigger a second `present(...)`.
+        ///
+        /// The poll-race refactor (commit 114f0ba) makes this structural:
+        /// `drainEvents`' outer loop is blocked awaiting
+        /// `raceChallengePresentation` for the entire challenge lifetime, and
+        /// the race's drain child consumes every further
+        /// `.threeDSChallengeReady` / `.redirectRequired` off the shared
+        /// `EventQueue` and drops it (`continue`) — so a re-emitted challenge
+        /// can never reach the sole presenter call site.
+        ///
+        /// This test locks that in deterministically (no reliance on
+        /// presenter-vs-poll timing): the presenter never resolves on its own
+        /// (frictionless-hosted model), so the ONLY way `present` could be
+        /// entered twice is a genuine re-present of the buffered event. We
+        /// feed TWO distinct challenge URLs back-to-back on the legacy poll
+        /// path (which, unlike the CAT path, applies no eventId dedup, so both
+        /// are surfaced as separate `.threeDSChallengeReady` events) followed
+        /// by `completed`. The poller reaches the terminal event while the
+        /// presentation is stranded, dismissing it. Correct behaviour:
+        /// `present` entered once, dismissed once, result `.completed`.
+        func test_submit_3dsChallenge_bufferedReEmissionWhilePresenting_doesNotRePresent() async throws {
+            let challengeURL1 = "https://3ds.example.com/acs?attempt=1"
+            let challengeURL2 = "https://3ds.example.com/acs?attempt=2"
+            func challengeJSON(url: String) -> String {
+                """
+                {
+                    "session_token": "sess_abc123",
+                    "status": "open",
+                    "next_action": {
+                        "action_type": "threeDsChallenge",
+                        "params": { "challenge_url": "\(url)" }
+                    },
+                    "payment_amount": { "amount": "10.00", "currency": "EUR" }
+                }
+                """
+            }
+
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open) // PATCH /details
+
+            // poll #1 → first challenge (presented, then stranded).
+            try mock.enqueue(decodeSession(challengeJSON(url: challengeURL1)))
+            // poll #2 → buffered re-emission (distinct URL) while presenting.
+            try mock.enqueue(decodeSession(challengeJSON(url: challengeURL2)))
+            // poll #3 → terminal; the poller wins the race and dismisses.
+            let completed = try decodeSession(completedSessionJSON)
+            mock.enqueue(completed)
+
+            let presenter = NeverResolvingChallengePresenter()
+            let coordinator = makeCoordinator(mock: mock, challengePresenter: presenter)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+            let presentCount = await presenter.presentCallCount
+            XCTAssertEqual(
+                presentCount,
+                1,
+                "A buffered challenge re-emission arriving mid-presentation must not re-present"
+            )
+            let dismissCount = await presenter.dismissCallCount
+            XCTAssertEqual(
+                dismissCount,
+                1,
+                "The stranded presentation must be dismissed exactly once when the poller wins the race"
+            )
+        }
+
         // MARK: - Checkout-attempt path (useCheckoutAttempts: true)
 
         func test_submit_checkoutAttemptPath_happyPath_returnsCompleted() async throws {
@@ -750,6 +1105,144 @@ import XCTest
             )
             XCTAssertNil(decodedCreateCAT["wallet"], "wallet must be absent on a plain credit-card attempt")
             XCTAssertNil(decodedCreateCAT["walletToken"])
+            XCTAssertNil(
+                decodedCreateCAT["customerDetails"],
+                "customerDetails must be absent when no beforeSubmit hook is configured (regression guard)"
+            )
+        }
+
+        // MARK: - beforeSubmit hook (Phase 4 / public API v1)
+
+        func test_submit_beforeSubmit_returnsCustomerDetails_threadsIntoCheckoutAttemptBody() async throws {
+            // The hook is awaited after tokenization and before the
+            // checkout-attempt POST; its returned customerDetails must land
+            // in the POST body's customerDetails.billingAddress /
+            // customerDetails.shippingAddress, with phone omitted entirely
+            // and no email carried on the shipping address (G2).
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse())
+            let openMap = try makeAttemptMap(sessionJSON: openSessionJSON)
+            let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON)
+            mock.enqueue(openMap)
+            mock.enqueue(completedMap)
+
+            let customerDetails = MollieCustomerDetails(
+                billingAddress: MollieAddress(
+                    givenName: "Jane",
+                    familyName: "Doe",
+                    email: "jane@example.com",
+                    streetAndNumber: "Keizersgracht 313",
+                    postalCode: "1016 EE",
+                    city: "Amsterdam",
+                    country: "NL"
+                ),
+                shippingAddress: MollieAddress(
+                    givenName: "Jane",
+                    familyName: "Doe",
+                    email: "should-be-stripped@example.com",
+                    streetAndNumber: "Keizersgracht 313",
+                    postalCode: "1016 EE",
+                    city: "Amsterdam",
+                    country: "NL"
+                )
+            )
+            let coordinator = makeCoordinator(
+                mock: mock,
+                useCheckoutAttempts: true,
+                beforeSubmit: { customerDetails }
+            )
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+
+            let createCAT = mock.capturedRequests[1]
+            let createCATBody = try XCTUnwrap(createCAT.body, "POST /checkout-attempts must carry a body")
+            let decodedCreateCAT = try XCTUnwrap(JSONSerialization.jsonObject(with: createCATBody) as? [String: Any])
+            let decodedCustomerDetails = try XCTUnwrap(decodedCreateCAT["customerDetails"] as? [String: Any])
+
+            let billing = try XCTUnwrap(decodedCustomerDetails["billingAddress"] as? [String: Any])
+            XCTAssertEqual(billing["givenName"] as? String, "Jane")
+            XCTAssertEqual(billing["familyName"] as? String, "Doe")
+            XCTAssertEqual(billing["email"] as? String, "jane@example.com")
+            XCTAssertEqual(billing["streetAndNumber"] as? String, "Keizersgracht 313")
+            XCTAssertEqual(billing["postalCode"] as? String, "1016 EE")
+            XCTAssertEqual(billing["city"] as? String, "Amsterdam")
+            XCTAssertEqual(billing["country"] as? String, "NL")
+            XCTAssertNil(billing["phone"], "phone is not part of the confirmed backend contract (G2)")
+
+            let shipping = try XCTUnwrap(decodedCustomerDetails["shippingAddress"] as? [String: Any])
+            XCTAssertEqual(shipping["givenName"] as? String, "Jane")
+            XCTAssertNil(
+                shipping["email"],
+                "shippingAddress.email must be stripped client-side even if the caller sets it (G2)"
+            )
+            XCTAssertNil(shipping["phone"], "phone is not part of the confirmed backend contract (G2)")
+        }
+
+        func test_submit_beforeSubmit_throws_abortsSubmission_invokesCancelAuthentication() async throws {
+            // A throwing hook must abort before the checkout-attempt POST
+            // goes out, surface as a terminal .failed(.invalidConfiguration),
+            // and still invoke the existing cancel-authentication path.
+            struct HookError: Error {}
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            // PATCH /cancel-authentication response.
+            let open = try decodeSession(openSessionJSON)
+            mock.enqueue(open)
+
+            let coordinator = makeCoordinator(
+                mock: mock,
+                useCheckoutAttempts: true,
+                beforeSubmit: { throw HookError() }
+            )
+            let result = await coordinator.submit(makeCardData())
+
+            guard case let .failed(error) = result else {
+                return XCTFail("Expected .failed, got \(result)")
+            }
+            guard case let .invalidConfiguration(field, _) = error else {
+                return XCTFail("Expected .invalidConfiguration, got \(error)")
+            }
+            XCTAssertEqual(field, "beforeSubmit")
+
+            // tokenize + PATCH cancel-authentication only — no POST /checkout-attempts.
+            XCTAssertEqual(
+                mock.callCount,
+                2,
+                "beforeSubmit throwing must abort before POST /checkout-attempts and invoke cancel-authentication"
+            )
+            XCTAssertFalse(
+                mock.capturedRequests.contains { $0.path.contains("checkout-attempts") && $0.method == .post },
+                "no checkout-attempt POST must be sent when beforeSubmit throws"
+            )
+        }
+
+        func test_submit_beforeSubmit_nil_bodyUnchangedFromToday() async throws {
+            // Regression guard: with no beforeSubmit hook configured, the
+            // checkout-attempt body must be identical to today's shape —
+            // no customerDetails key at all.
+            let mock = MockHTTPClient()
+            mock.enqueue(makeToken())
+            mock.enqueue(makeCATResponse())
+            let openMap = try makeAttemptMap(sessionJSON: openSessionJSON)
+            let completedMap = try makeAttemptMap(sessionJSON: completedSessionJSON)
+            mock.enqueue(openMap)
+            mock.enqueue(completedMap)
+
+            let coordinator = makeCoordinator(mock: mock, useCheckoutAttempts: true)
+            let result = await coordinator.submit(makeCardData())
+
+            guard case .completed = result else {
+                return XCTFail("Expected .completed, got \(result)")
+            }
+
+            let createCAT = mock.capturedRequests[1]
+            let createCATBody = try XCTUnwrap(createCAT.body)
+            let decodedCreateCAT = try XCTUnwrap(JSONSerialization.jsonObject(with: createCATBody) as? [String: Any])
+            XCTAssertNil(decodedCreateCAT["customerDetails"])
         }
 
         func test_submit_checkoutAttemptPath_factoryProducesWebSDKContractBody() throws {
@@ -1049,16 +1542,25 @@ import XCTest
         /// Test-only presenter whose `present`/`presentRedirect` never resolve on
         /// their own — modelling a frictionless hosted 3DS page that completes
         /// the payment server-side without ever navigating to the return URL or
-        /// firing the `mollie-interceptor` postMessage (PXP-5009). Only resolves
+        /// firing the `mollie-interceptor` postMessage. Only resolves
         /// when `dismiss()` is called, mirroring how the real `ThreeDSCoordinator`
         /// tears down a presentation the poller has already raced past.
         private final class NeverResolvingChallengePresenter: ChallengePresenting, @unchecked Sendable {
             private let lock = NSLock()
             private var pending: CheckedContinuation<ThreeDSResult, Never>?
             private var _dismissCallCount = 0
+            private var _presentCallCount = 0
 
             var dismissCallCount: Int {
                 get async { lock.withLock { _dismissCallCount } }
+            }
+
+            /// Number of times `present`/`presentRedirect` was invoked. Used by
+            /// the buffered-re-emission regression to assert the presenter
+            /// is entered exactly once even when a second `.threeDSChallengeReady`
+            /// is delivered while the first presentation is still in flight.
+            var presentCallCount: Int {
+                get async { lock.withLock { _presentCallCount } }
             }
 
             func present(challengeURL: URL, in container: any ChallengeContainer) async -> ThreeDSResult {
@@ -1071,7 +1573,10 @@ import XCTest
                 in _: any ChallengeContainer
             ) async -> ThreeDSResult {
                 await withCheckedContinuation { (continuation: CheckedContinuation<ThreeDSResult, Never>) in
-                    lock.withLock { pending = continuation }
+                    lock.withLock {
+                        _presentCallCount += 1
+                        pending = continuation
+                    }
                 }
             }
 
@@ -1108,6 +1613,19 @@ import XCTest
 
             var snapshot: [SessionResponse] {
                 get async { lock.withLock { responses } }
+            }
+        }
+
+        private final class EventsCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var events: [ChannelEvent] = []
+
+            func append(_ event: ChannelEvent) {
+                lock.withLock { events.append(event) }
+            }
+
+            var snapshot: [ChannelEvent] {
+                get async { lock.withLock { events } }
             }
         }
     }

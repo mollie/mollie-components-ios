@@ -141,6 +141,31 @@ final class CardFormValidatorTests: XCTestCase {
         )
     }
 
+    // MARK: - validateAll
+
+    func test_validateAll_validSnapshot_returnsEmpty() {
+        XCTAssertEqual(CardFormValidator.validateAll(snapshot: makeSnapshot()), [])
+    }
+
+    func test_validateAll_singleFieldInvalid_returnsThatError() {
+        let snapshot = makeSnapshot(cvc: "12")
+        XCTAssertEqual(
+            CardFormValidator.validateAll(snapshot: snapshot),
+            [.cvcWrongLength]
+        )
+    }
+
+    func test_validateAll_multipleFieldsInvalid_returnsAllErrorsInFieldOrder() {
+        // cardholder, pan, expiry, cvc all fail — order must match that
+        // field order regardless of which check would win under
+        // first-failure `validate(_:)`.
+        let snapshot = makeSnapshot(name: "", pan: "424242424242", expiry: "1240", cvc: "12")
+        XCTAssertEqual(
+            CardFormValidator.validateAll(snapshot: snapshot),
+            [.missingCardholder, .panTooShort, .expiry(.malformed), .cvcWrongLength]
+        )
+    }
+
     // MARK: - User messages
 
     func test_userMessages_areSpecificEnoughToAct() {

@@ -77,7 +77,20 @@ final class MockHTTPClient: HTTPClient, @unchecked Sendable {
         repeating = .failure(error)
     }
 
+    /// Register a per-type default response returned when no queued outcome
+    /// matches `T`. Keyed by `String(reflecting:)` so two producers of DISTINCT
+    /// response types can each have their own always-on default (e.g. a stuck
+    /// `CheckoutAttemptsStateMap` for the attempt path while the session GET's
+    /// `SessionResponse` is enqueued positionally). Unlike `enqueueRepeating`,
+    /// this never answers a call for a different type.
+    func setDefault<V>(_ value: V) {
+        lock.lock()
+        defer { lock.unlock() }
+        defaultsByType[String(reflecting: V.self)] = value
+    }
+
     private var repeating: Outcome?
+    private var defaultsByType: [String: Any] = [:]
 
     func perform<T: Decodable>(_ endpoint: Endpoint<T>) async throws -> T {
         lock.lock()
@@ -91,23 +104,40 @@ final class MockHTTPClient: HTTPClient, @unchecked Sendable {
             CapturedRequest(path: endpoint.path, method: endpoint.method, body: encodedBody)
         )
         let outcome: Outcome
-        if queue.isEmpty {
-            guard let repeating else {
-                lock.unlock()
-                // Fail the assertion but let the suite continue rather than
-                // crash the whole test process via fatalError.
-                XCTFail("MockHTTPClient: response queue is empty for call #\(callCount) — check test setup")
-                throw MollieError.network(URLError(.unknown))
+        // Type-routed consumption: take the FIRST queued outcome that either
+        // carries a `.success` value assignable to `T`, or is any `.failure`
+        // (failures stay positional — whichever call reaches them first).
+        // For a single-type-at-a-time sequence the first match IS the head, so
+        // every existing FIFO test is unaffected; but two CONCURRENT producers
+        // of DISTINCT response types (GET /sessions → SessionResponse vs
+        // GET /checkout-attempts → CheckoutAttemptsStateMap) can each pull only
+        // their own responses out of one interleaved queue.
+        if let index = queue.firstIndex(where: { element in
+            switch element {
+            case let .success(value): value is T
+            case .failure: true
             }
+        }) {
+            outcome = queue.remove(at: index)
+        } else if let value = defaultsByType[String(reflecting: T.self)] {
+            // No queued match → fall back to a per-type default if registered.
+            outcome = .success(value)
+        } else if let repeating {
             outcome = repeating
         } else {
-            outcome = queue.removeFirst()
+            lock.unlock()
+            // Fail the assertion but let the suite continue rather than
+            // crash the whole test process via fatalError.
+            XCTFail("MockHTTPClient: response queue is empty for call #\(callCount) — check test setup")
+            throw MollieError.network(URLError(.unknown))
         }
         lock.unlock()
         switch outcome {
         case let .success(value):
             guard let typed = value as? T else {
-                XCTFail("MockHTTPClient: enqueued value type mismatch (expected \(T.self)) — check test setup")
+                XCTFail(
+                    "MockHTTPClient: enqueued value type mismatch (expected \(T.self), got \(type(of: value))) — check test setup"
+                )
                 throw MollieError.network(URLError(.unknown))
             }
             return typed

@@ -32,7 +32,7 @@ public struct RetryPolicy {
     /// Whether an error should be retried on the given attempt.
     ///
     /// Retries are gated on `isIdempotent` — charging POST/PATCH are never
-    /// auto-retried (no server-honoured dedup exists; spike #316, Model B).
+    /// auto-retried (no server-honoured dedup exists; Model B).
     /// For idempotent ops we retry transient URLErrors plus HTTP failures the
     /// server has already classified as transient: `5xx`, `429`, and `409`.
     public func shouldRetry(attempt: Int, error: Error, isIdempotent: Bool) -> Bool {

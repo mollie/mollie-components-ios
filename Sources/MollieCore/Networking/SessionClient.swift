@@ -41,7 +41,7 @@ public final class SessionClient: HTTPClient, @unchecked Sendable {
         } catch let error as MollieError {
             // Retry server-classified transient failures (5xx / 429 / 409) for
             // idempotent ops only, honouring any Retry-After. Charging POST/PATCH
-            // are excluded via isIdempotent (spike #316, Model B).
+            // are excluded via isIdempotent (Model B).
             if try await retryIfPossible(error: error, request: request, endpoint: endpoint, attempt: attempt) {
                 return try await execute(request: request, endpoint: endpoint, attempt: attempt + 1)
             }

@@ -1,6 +1,6 @@
 # ``MollieComponents``
 
-Accept card payments in your iOS app with a drop-in, PCI-aware payment UI — card tokenization, 3D Secure, and theming behind a single import.
+Accept card payments in your iOS app with a drop-in, PCI-aware payment UI — card tokenization and 3D Secure behind a single import.
 
 ## Overview
 
@@ -10,32 +10,32 @@ Accept card payments in your iOS app with a drop-in, PCI-aware payment UI — ca
 
 > Important: The SDK runs inside your app's process. UIKit provides no platform-level isolation between your code and the SDK, so the protection of typed card data is **contractual, not platform-enforced**. Read `SECURITY.md` at the repository root for the full trust model — what the SDK defends against, what it cannot enforce, and the integration practices your team must follow.
 
-To get going in a few lines, see <doc:GettingStarted>. To restyle the sheet to match your brand, see <doc:Theming>. To map every outcome the SDK can hand back to merchant-facing behavior, see <doc:HandlingErrors>.
+To get going in a few lines, see <doc:GettingStarted>. To map every outcome the SDK can hand back to merchant-facing behavior, see <doc:HandlingErrors>.
 
 ## Topics
 
 ### Getting Started
 
 - <doc:GettingStarted>
-- ``MolliePaymentSheet``
+- ``MollieCheckout``
 
 ### Presenting
 
-- ``MolliePaymentSheet``
-- ``MolliePaymentCardFormView``
+- ``MollieCheckout``
+- ``MollieCardComponent``
 
 ### Results
 
 - ``MolliePaymentResult``
 - ``MolliePayment``
 
-### Customizing appearance
+### Appearance
 
 - <doc:Theming>
 
 ### Configuration
 
-- ``MolliePaymentEndpoints``
+- ``MollieEndpoints``
 
 ### Handling Errors
 

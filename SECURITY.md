@@ -10,7 +10,7 @@ This document describes what the SDK does to protect typed card data, what it ca
 
 | Defense | Mechanism | Threat covered |
 | --- | --- | --- |
-| Secure input mode on PAN + CVC | `UITextField.isSecureTextEntry = true` | Screen recording, screenshots, AirPlay mirroring, QuickType / dictation caches, VoiceOver value leakage |
+| Card-entry fields are **not** in secure-entry mode (by design) | `isSecureTextEntry` is intentionally left `false` on PAN + CVC — card-entry UX requires the user to see the digits they type; masking drives typos and retries that re-expose the PAN more than a screen recorder would. The real screen-capture / observer defenses are the app-switcher + screen-recording privacy overlays, pasteboard + edit-menu (copy / cut / share) blocking, masked accessibility values, and the best-effort field wipe — see the rows below | Documents an intentional non-defense; the covering defenses are listed in the following rows |
 | Privacy overlay on app-switcher snapshot | Full-window overlay on `UIApplication.willResignActiveNotification` + `didEnterBackgroundNotification` | iOS app-switcher snapshot captured by the OS |
 | Privacy overlay on screen capture / mirroring | Full-window overlay on `UIScreen.capturedDidChangeNotification` | Social-engineered screen sharing, AirPlay |
 | Pasteboard action blocking on PAN + CVC | `canPerformAction(_:withSender:)` returns `false` for `copy:`, `cut:`, `_share:`, `_define:`, `_translate:` | Accidental or malicious clipboard scrape (the iOS pasteboard is process-global) |
@@ -18,7 +18,7 @@ This document describes what the SDK does to protect typed card data, what it ca
 | Field wipe on dismount | Same wipe on `viewWillDisappear` | User navigates away mid-typing or post-result |
 | Snapshot value-type wipe | `CardFormSnapshot.zero()` after the host coordinator has consumed the snapshot | The producer-side reference inside the SDK |
 | `Tokenisation-Agent` header | Vendor-prefixed identifier on every `/v1/card-tokens` request | Server-side detection of unauthorized SDK usage |
-| TLS / SPKI certificate pinning | `MolliePaymentEndpoints.production`'s `URLSession` delegate additionally requires the Google Trust Services chain on `sessions.mollie.com` and `api.cc.mollie.com` | A network attacker (rogue CA, compromised device trust store) presenting a certificate from an unrelated issuer |
+| TLS / SPKI certificate pinning | `MollieEndpoints.production`'s `URLSession` delegate additionally requires the Google Trust Services chain on `sessions.mollie.com` and `api.cc.mollie.com` | A network attacker (rogue CA, compromised device trust store) presenting a certificate from an unrelated issuer |
 
 ## TLS / SPKI certificate pinning
 
@@ -44,9 +44,18 @@ unmaintained SDK version doesn't lose all connectivity over a missed rotation.
 See [`docs/security/tls-pin-rotation-runbook.md`](docs/security/tls-pin-rotation-runbook.md)
 for the rotation and expiry-checkpoint procedure.
 
-**Scope.** Only the two API-client hosts above are pinned. The 3D Secure
-challenge flow renders third-party issuer/ACS pages in a `WKWebView`; those
-hosts aren't Mollie-controlled and can't be pinned.
+**Scope.** Only the two API-client hosts above are pinned. The 3-D Secure
+challenge flow renders third-party issuer/ACS pages in a `WKWebView`, which does
+not route through the SDK's `URLSession` — so SPKI pinning is not applicable to
+that channel. The ACS page is instead defended by an HTTPS-only pre-load guard
+that blocks non-HTTPS schemes and private/loopback/link-local/metadata
+addresses, an exact-host `postMessage` origin allowlist, and return/cancel URL
+matchers host-locked to `secure-3ds.mollie.com`. The residual — a network
+attacker holding a device-trusted certificate for the ACS host — is accepted: it
+is bounded by browser-grade TLS plus these guards, and Mollie's own Web SDK
+applies strictly less here (it loads the ACS with no host validation and gates
+`postMessage` on a forgeable body field rather than the sender origin). Own-key
+pinning of a third-party ACS host is not possible.
 
 ## What the SDK cannot enforce
 
@@ -65,7 +74,7 @@ The SDK does not attempt to detect or block these vectors. They are out of scope
 
 ### ✅ Do
 
-- Use `MolliePaymentCardFormView` (embedded SwiftUI) or `MolliePaymentSheet.present(...)` (modal UIKit) — both consume the same hardened form.
+- Use `MollieCardComponent` (embedded SwiftUI) or `MolliePaymentSheet.present(...)` (modal UIKit) — both consume the same hardened form.
 - Treat your `onResult` callback as the only source of truth for the payment outcome. The session token + amount + currency it carries are sufficient for backend reconciliation.
 - Disable third-party keyboard support in your app's `application(_:shouldAllowExtensionPointIdentifier:)` if your compliance posture demands it. The SDK cannot block keyboards at the field level.
 - Audit any custom theme overrides — a malicious theme could leak the typed value via, e.g., a custom `Colors` provider that prints. The default theme is safe.
@@ -76,7 +85,7 @@ The SDK does not attempt to detect or block these vectors. They are out of scope
 - Subclass `MollieCardFormViewController`. The class is `package`-scoped for a reason; subclassing from outside the SDK is unsupported and may break on patch releases.
 - Swizzle UIKit selectors on `UITextField` or its `MolliePaymentsUI` subclasses (`CardNumberTextField`, `CVCTextField`, etc.).
 - Log the contents of any closure parameter that touches the form. The documented surface (`onResult`) is safe to log; the package-internal `onSubmit` snapshot is not.
-- Run the SDK on jailbroken devices in production builds. The platform protections above (secure input mode, pasteboard isolation) are bypassable on a jailbroken device.
+- Run the SDK on jailbroken devices in production builds. The platform protections above (privacy overlays, pasteboard isolation) are bypassable on a jailbroken device.
 
 ## Stronger isolation when you need it
 

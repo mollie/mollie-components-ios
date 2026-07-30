@@ -48,4 +48,24 @@ final class ChannelEventTests: XCTestCase {
         XCTAssertNotEqual(ChannelEvent.sessionFailed(problem), .sessionFailed(other))
         XCTAssertNotEqual(ChannelEvent.sessionFailed(problem), .sessionFailed(nil))
     }
+
+    /// Retryable soft-decline case. Non-terminal sibling of
+    /// `.sessionFailed` — same payload shape, different terminality.
+    func test_attemptFailed_equatable() {
+        XCTAssertEqual(ChannelEvent.attemptFailed(nil), .attemptFailed(nil))
+
+        let problem = ProblemDetails(type: "t", title: "ti", detail: "d", status: 422, instance: "i")
+        let other = ProblemDetails(type: "t", title: "ti", detail: "d", status: 500, instance: "i")
+        XCTAssertEqual(ChannelEvent.attemptFailed(problem), .attemptFailed(problem))
+        XCTAssertNotEqual(ChannelEvent.attemptFailed(problem), .attemptFailed(other))
+        XCTAssertNotEqual(ChannelEvent.attemptFailed(problem), .attemptFailed(nil))
+    }
+
+    func test_attemptFailed_notEqualTo_sessionFailed_sameDetails() {
+        // Distinct cases must not compare equal even with identical payload —
+        // guards against accidentally collapsing the terminal/non-terminal
+        // split into a shared associated-value comparison.
+        let problem = ProblemDetails(title: "declined", detail: "insufficient funds")
+        XCTAssertNotEqual(ChannelEvent.attemptFailed(problem), .sessionFailed(problem))
+    }
 }

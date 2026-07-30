@@ -89,6 +89,46 @@ final class SessionPollerTests: XCTestCase {
         }
     }
 
+    /// A single `fetch()` must be bounded by the REMAINING poll budget.
+    /// The shared production `URLSession` has `waitsForConnectivity = true` +
+    /// `timeoutIntervalForResource = 120`, so one fetch can block ~120s waiting
+    /// for connectivity. The between-fetches budget check can't cut that off —
+    /// it only runs once the stalled fetch returns. This test proves the fetch
+    /// itself is deadline-bounded: with a tiny finite budget and a fetch that
+    /// stalls far longer, the stream must throw `.timeout` FAST (well under the
+    /// stall) rather than hang for the full stall duration.
+    func test_poll_singleStalledFetch_boundedByRemainingBudget() async {
+        final class StallingHTTPClient: HTTPClient, @unchecked Sendable {
+            func perform<T: Decodable>(_: Endpoint<T>) async throws -> T {
+                // Stall far longer than the poll budget. Task.sleep is
+                // cancellation-aware, mirroring URLSession's async cancel
+                // behaviour when the deadline task tears the group down.
+                try await Task.sleep(nanoseconds: 5_000_000_000) // 5s
+                throw MollieError.network(URLError(.timedOut))
+            }
+        }
+        // Small finite budget; a stalled fetch would otherwise run ~5s.
+        let schedule = PollingSchedule(intervals: [0.01], totalBudget: 0.3)
+        let poller = SessionPoller(httpClient: StallingHTTPClient(), sessionToken: sessionToken, schedule: schedule)
+
+        let start = ContinuousClock.now
+        do {
+            _ = try await collect(from: poller.poll())
+            XCTFail("Expected MollieError.timeout to be thrown")
+        } catch let MollieError.timeout(operation) {
+            XCTAssertEqual(operation, "session-polling")
+        } catch {
+            XCTFail("Expected MollieError.timeout but got \(error)")
+        }
+        let elapsed = start.duration(to: .now)
+        // Pre-fix: the fetch runs its full 5s stall before any budget check,
+        // so elapsed ≈ 5s. Post-fix: the fetch is capped at the remaining
+        // budget (~0.3s), so the stream fails fast. 1s gives generous
+        // scheduler headroom while staying well under the 5s stall.
+        XCTAssertLessThan(elapsed, .seconds(1),
+                          "A single stalled fetch must be bounded by the remaining budget, not hang for its full duration")
+    }
+
     // MARK: - Cancellation
 
     func test_poll_cancellation_stopsImmediately() async throws {
@@ -144,7 +184,9 @@ final class SessionPollerTests: XCTestCase {
         var results: [SessionResponse] = []
         for try await response in poller.pollAttempt() {
             results.append(response)
-            if results.count == 2 { break }
+            if results.count == 2 {
+                break
+            }
         }
         XCTAssertEqual(results.count, 2)
         XCTAssertEqual(results[0].status, .known(.open))
@@ -191,7 +233,9 @@ final class SessionPollerTests: XCTestCase {
         var results: [SessionResponse] = []
         for try await response in poller.pollAttempt() {
             results.append(response)
-            if results.count == 2 { break }
+            if results.count == 2 {
+                break
+            }
         }
         XCTAssertEqual(results.count, 2)
         XCTAssertEqual(results[0].nextAction.eventId, 42)
@@ -283,11 +327,15 @@ final class SessionPollerTests: XCTestCase {
         mock.enqueue(CheckoutAttemptsStateMap())
         mock.enqueue(CheckoutAttemptsStateMap())
         mock.enqueue(makeMap(token: "cat_abc", status: .completed, eventId: 1))
-        // Steeply escalating intervals: if the index advances on misses,
-        // gap #3 → #4 would be 0.4s. If it stays pinned, gap stays at 0.02s.
+        // Steeply escalating intervals with a near-zero intervals[0]. If the
+        // index stays pinned, the three misses sleep ~0s and elapsed is just
+        // test overhead. If the index advances, the second/third miss sleep
+        // 1.0s + 2.0s, so elapsed jumps to seconds — a multi-second gap that
+        // discriminates robustly even on a loaded CI runner (the old
+        // 0.06s-vs-0.32s spread was within scheduler-jitter range and flaked).
         let schedule = PollingSchedule(
-            intervals: [0.02, 0.1, 0.2, 0.4, 0.8],
-            totalBudget: 5.0
+            intervals: [0.01, 1.0, 2.0, 4.0, 8.0],
+            totalBudget: 20.0
         )
         let poller = SessionPoller(
             httpClient: mock,
@@ -300,11 +348,11 @@ final class SessionPollerTests: XCTestCase {
             break
         }
         let elapsed = start.duration(to: .now)
-        // Pinned to intervals[0] (0.02s) × 3 misses + initial poll = ~0.06s.
-        // If the backoff advanced, elapsed would be ≥ 0.02 + 0.1 + 0.2 = 0.32s.
-        // Allow generous headroom for scheduler jitter but well under the
-        // advanced-index threshold.
-        XCTAssertLessThan(elapsed, .milliseconds(250),
+        // Pinned to intervals[0] (0.01s) × 3 misses = ~0.03s + overhead.
+        // If the backoff advanced, elapsed would be ≥ 1.0 + 2.0 = 3.0s.
+        // The 0.5s threshold sits far above worst-case CI overhead yet far
+        // below the advanced-index floor — a ~6× margin either way.
+        XCTAssertLessThan(elapsed, .milliseconds(500),
                           "Transient misses must not advance the backoff index")
     }
 

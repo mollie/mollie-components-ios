@@ -24,7 +24,7 @@ import Foundation
 /// `SingleFlight` guarantees that a second `submit` call while one is
 /// already in flight returns `.failed(.invalidConfiguration)` instead of
 /// silently queueing.
-/// Made public for demo target access; will be re-evaluated when MollieComponents umbrella ships in Phase 4.
+/// Made public for demo target access; will be re-evaluated once the `MollieComponents` umbrella target ships.
 public final class CardPaymentCoordinator: Sendable {
     private let sessionsClient: any HTTPClient
     private let tokenizer: CardTokenizer
@@ -33,10 +33,33 @@ public final class CardPaymentCoordinator: Sendable {
     private let challengeContainer: any ChallengeContainer
     private let sessionToken: String
     private let onSessionUpdate: (@Sendable (SessionResponse) -> Void)?
+    /// Widened sibling of `onSessionUpdate`: fires for every non-terminal
+    /// `ChannelEvent` tick observed while draining (session snapshots AND
+    /// 3DS-challenge/redirect presentation), so a caller building an
+    /// observable session-shaped stream (see `MollieCheckoutEvent`) can
+    /// forward mid-flow progress without re-deriving it from
+    /// `onSessionUpdate`'s narrower `SessionResponse`-only payload. Never
+    /// fires for the two terminal `ChannelEvent` cases — those are left to
+    /// the caller to derive from `submit(_:)`'s terminal `CardPaymentResult`
+    /// return value, so a single attempt's terminal event is never reported
+    /// twice.
+    private let onEvent: (@Sendable (ChannelEvent) -> Void)?
     private let singleFlight = SingleFlight()
     private let useCheckoutAttempts: Bool
     private let pollerFactory: @Sendable (_ sessionToken: String, _ checkoutAttemptToken: String) -> SessionPoller
     private let consumerFactory: @Sendable (SessionPoller) -> SessionEventConsumer
+    /// Awaited once per submit, right after tokenization and before the
+    /// checkout-attempt POST, so a merchant can inject `MollieCustomerDetails`
+    /// or veto the submission outright. A throw aborts the submission,
+    /// triggers `sendCancelAuthentication()`, and surfaces as a terminal
+    /// `.failed(.invalidConfiguration(field: "beforeSubmit", ...))`.
+    private let beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)?
+    /// Budget for the concurrent session-completion poll on the checkout-attempt
+    /// path (see `SessionEventConsumer.observeCardPayment`). Spans an interactive
+    /// 3DS challenge so a paid+authorized session is observed via `GET /sessions`
+    /// even when the attempt projection stalls. A non-positive value disables the
+    /// concurrent poll (used by tests pinning attempt-only behaviour).
+    private let challengeCompletionBudget: TimeInterval
 
     package init(
         sessionsClient: any HTTPClient,
@@ -49,7 +72,10 @@ public final class CardPaymentCoordinator: Sendable {
         challengeContainer: any ChallengeContainer,
         pollingSchedule: PollingSchedule = .default,
         useCheckoutAttempts: Bool = true,
-        onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil
+        onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil,
+        onEvent: (@Sendable (ChannelEvent) -> Void)? = nil,
+        beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil,
+        challengeCompletionBudget: TimeInterval = SessionEventConsumer.defaultChallengeCompletionBudget
     ) {
         self.sessionsClient = sessionsClient
         tokenizer = CardTokenizer(httpClient: tokenizerClient, profileToken: profileToken, testmode: testmode)
@@ -67,6 +93,9 @@ public final class CardPaymentCoordinator: Sendable {
         self.challengeContainer = challengeContainer
         self.sessionToken = sessionToken
         self.onSessionUpdate = onSessionUpdate
+        self.onEvent = onEvent
+        self.beforeSubmit = beforeSubmit
+        self.challengeCompletionBudget = challengeCompletionBudget
         self.useCheckoutAttempts = useCheckoutAttempts
         // Default factories for the checkout-attempt path; built lazily at submit time.
         pollerFactory = { [sessionsClient, pollingSchedule] sToken, catToken in
@@ -117,21 +146,25 @@ public final class CardPaymentCoordinator: Sendable {
 
     /// The one logical submit. Both charging POSTs it drives — `tokenize` and
     /// `createCheckoutAttempt` — are **not auto-retried** (no server honours an
-    /// inbound idempotency key, so the SDK adds none; spike #316 / Model B). A
+    /// inbound idempotency key, so the SDK adds none; Model B). A
     /// second `submit` while one is in flight is rejected by `SingleFlight`, so
     /// an in-process re-tap cannot double-charge. The `checkoutAttemptToken`
     /// minted by `createCheckoutAttempt` is the dedup anchor; on an
     /// indeterminate outcome the flow surfaces `.timeout(operation:)` and the
     /// merchant reconciles server-side. Any future idempotency key would be
     /// minted once here (one key per logical submit) and reused across HTTP
-    /// attempts — never per-attempt. See decisions-log "2026-06-23 — Network
-    /// idempotency model decided (spike #316 resolved)".
+    /// attempts — never per-attempt, per the 2026-06-23 network-idempotency
+    /// design decision (Model B, token-as-anchor).
     private func runSubmit(_ data: CardSubmissionData) async throws -> CardPaymentResult {
+        // Local, mutable copy so we can best-effort wipe the PAN/CVC once the
+        // card token is in hand (see `workingData.zero()` below). The caller
+        // still owns its own copy.
+        var workingData = data
         // 1. Tokenize the PAN.
         MollieLogger.log("Coordinator", "step 1: tokenizing card")
         let token: CardToken
         do {
-            token = try await tokenizer.tokenize(data)
+            token = try await tokenizer.tokenize(workingData)
         } catch {
             // Re-throw as `.tokenizationFailed` so callers can distinguish
             // tokenizer-vs-network errors at the user-facing surface (the
@@ -151,20 +184,56 @@ public final class CardPaymentCoordinator: Sendable {
         }
         MollieLogger.log("Coordinator", "step 1 done: cardToken=...\(token.value.suffix(4))")
 
+        // The PAN/CVC are no longer needed once we hold the card token.
+        // Best-effort drop them from our working copy to shrink the in-memory
+        // window (this is "drop the reference," not guaranteed scrubbing — see
+        // CardSubmissionData.zero()).
+        workingData.zero()
+
+        // 1b. Merchant hook: let the caller inject customer details (or veto
+        // the submission) now that a token is in hand but before anything is
+        // charged. A throw here aborts the submission before the
+        // checkout-attempt POST goes out.
+        let customerDetails: MollieCustomerDetails?
+        if let beforeSubmit {
+            do {
+                customerDetails = try await beforeSubmit()
+            } catch {
+                // Preserve the original error before it's flattened into a
+                // `localizedDescription` string on the public `MollieError`:
+                // the merchant's hook may throw a typed domain error (e.g. a
+                // network failure fetching billing details) whose type/object
+                // is otherwise lost from every diagnostic surface. The public
+                // error shape stays unchanged.
+                MollieLogger.log("beforeSubmit", "hook threw: \(error)")
+                await sendCancelAuthentication()
+                throw MollieError.invalidConfiguration(
+                    field: "beforeSubmit",
+                    reason: "beforeSubmit hook threw: \(error.localizedDescription)"
+                )
+            }
+        } else {
+            customerDetails = nil
+        }
+
         if useCheckoutAttempts {
-            return try await runSubmitViaCheckoutAttempt(pspToken: token.value)
+            return try await runSubmitViaCheckoutAttempt(pspToken: token.value, customerDetails: customerDetails)
         } else {
             return try await runSubmitViaLegacyPatch(pspToken: token.value)
         }
     }
 
-    private func runSubmitViaCheckoutAttempt(pspToken: String) async throws -> CardPaymentResult {
+    private func runSubmitViaCheckoutAttempt(
+        pspToken: String,
+        customerDetails: MollieCustomerDetails?
+    ) async throws -> CardPaymentResult {
         // 2. POST /checkout-attempts — receive a checkout-attempt token.
         MollieLogger.log("Coordinator", "step 2: POST /checkout-attempts sessionToken=...\(sessionToken.suffix(4))")
         let fingerprint = await DeviceFingerprintBuilder.current()
         let body = CreateCheckoutAttemptRequestFactory.creditCard(
             pspToken: pspToken,
-            fingerprint: fingerprint
+            fingerprint: fingerprint,
+            customerDetails: customerDetails
         )
         let created = try await sessionsClient.perform(
             SessionEndpoint.createCheckoutAttempt(sessionToken: sessionToken, body: body)
@@ -176,7 +245,10 @@ public final class CardPaymentCoordinator: Sendable {
         let poller = pollerFactory(sessionToken, checkoutAttemptToken)
         let consumer = consumerFactory(poller)
         return try await drainEvents(
-            stream: consumer.observeAttempt(sessionToken: sessionToken)
+            stream: consumer.observeCardPayment(
+                sessionToken: sessionToken,
+                challengeCompletionBudget: challengeCompletionBudget
+            )
         )
     }
 
@@ -212,7 +284,7 @@ public final class CardPaymentCoordinator: Sendable {
         stream: AsyncThrowingStream<ChannelEvent, Error>,
         initialSession: SessionResponse? = nil
     ) async throws -> CardPaymentResult {
-        // PXP-5009: a frictionless hosted 3DS page (pay.mollie.nl/payment/
+        // A frictionless hosted 3DS page (pay.mollie.nl/payment/
         // prepare-authentication/…) completes the payment server-side
         // without ever navigating to the return URL or firing the
         // `mollie-interceptor` postMessage, so `present`/`presentRedirect`
@@ -225,9 +297,8 @@ public final class CardPaymentCoordinator: Sendable {
         // task-group race: cancelling a task suspended inside
         // `AsyncThrowingStream.AsyncIterator.next()` terminates the stream's
         // shared underlying storage for EVERY consumer, including copies
-        // that were never themselves cancelled (verified empirically — see
-        // decisions-log "PXP-5009 — AsyncThrowingStream cancellation poisons
-        // shared storage"). Racing the raw iterator directly would therefore
+        // that were never themselves cancelled (verified empirically).
+        // Racing the raw iterator directly would therefore
         // permanently kill the poll stream the first time a challenge
         // presentation won the race, breaking the very next `.next()` call
         // the outer loop makes. Instead, a single, never-cancelled `pump`
@@ -274,6 +345,7 @@ public final class CardPaymentCoordinator: Sendable {
                 // `https://example.com/return`). Pre-poll cases where we
                 // have no session yet pass `nil`; the presenter falls back
                 // to its existing behaviour.
+                onEvent?(.threeDSChallengeReady(url))
                 let challengeReturnURL = merchantReturnURL
                 let sessionBox = SessionBox(lastSession)
                 let outcome = try await raceChallengePresentation(
@@ -301,6 +373,7 @@ public final class CardPaymentCoordinator: Sendable {
                 // success — the polling stream stays open and only a
                 // subsequent `.sessionCompleted` from status=completed yields
                 // a successful CardPaymentResult.
+                onEvent?(.redirectRequired(url))
                 let returnURL = merchantReturnURL
                 let sessionBox = SessionBox(lastSession)
                 let outcome = try await raceChallengePresentation(
@@ -330,7 +403,16 @@ public final class CardPaymentCoordinator: Sendable {
                     merchantReturnURL = redirect
                 }
                 onSessionUpdate?(session)
+                onEvent?(.sessionUpdated(session))
                 continue
+            case let .attemptFailed(details):
+                // Retryable soft-decline: THIS attempt is
+                // done (the polled attempt/session has already reset
+                // server-side), so return to the caller instead of
+                // continuing to poll a dead attempt token. See
+                // `handleAttemptFailed` for why this does not tear down the
+                // session the way `.sessionFailed` does.
+                return handleAttemptFailed(details, lastSession: lastSession)
             }
         }
 
@@ -358,6 +440,23 @@ public final class CardPaymentCoordinator: Sendable {
             onSessionUpdate?(lastSession)
         }
         return .failed(.sessionFailed(details))
+    }
+
+    /// Handles a retryable soft-decline
+    /// (`ChannelEvent.attemptFailed`). Unlike `handleSessionFailed`, this
+    /// does NOT call `sendCancelAuthentication()` — the server has already
+    /// reset the session to `CREATED` itself (that's what makes the decline
+    /// "retryable" in the first place), so there is nothing left to clean
+    /// up server-side. A fresh `submit(_:)` call on the same
+    /// `CardPaymentCoordinator`/session is accepted immediately.
+    private func handleAttemptFailed(
+        _ details: ProblemDetails?,
+        lastSession: SessionResponse?
+    ) -> CardPaymentResult {
+        if let lastSession {
+            onSessionUpdate?(lastSession)
+        }
+        return .attemptFailed(details)
     }
 
     /// Lock-guarded holder for the session snapshot the draining child of
@@ -390,8 +489,7 @@ public final class CardPaymentCoordinator: Sendable {
     /// `AsyncThrowingStream.AsyncIterator` terminates its entire shared
     /// storage when a task suspended inside `.next()` is cancelled — even
     /// for iterator copies that were never themselves cancelled (verified
-    /// empirically; see decisions-log "PXP-5009 — AsyncThrowingStream
-    /// cancellation poisons shared storage"). `raceChallengePresentation`
+    /// empirically). `raceChallengePresentation`
     /// needs to cancel the losing side of its race, so racing the raw
     /// iterator directly would permanently kill the poll stream the first
     /// time a presentation won. `EventQueue` decouples "pull from the raw
@@ -494,11 +592,18 @@ public final class CardPaymentCoordinator: Sendable {
         case presented(ThreeDSResult)
         case sessionCompleted(SessionResponse)
         case sessionFailed(ProblemDetails?)
+        /// A retryable soft-decline arrived while a
+        /// challenge/redirect presentation was still in flight (e.g. the
+        /// poller observes the server-side reset before the WebView
+        /// resolves). Same treatment as `sessionFailed` for the purposes of
+        /// this race — the stranded presenter must be dismissed — but maps
+        /// to `CardPaymentResult.attemptFailed` rather than `.failed`.
+        case attemptFailed(ProblemDetails?)
         case streamEnded
     }
 
     /// Races a challenge/redirect presentation against continued poll-stream
-    /// draining (PXP-5009), both reading from the shared `EventQueue` so
+    /// draining, both reading from the shared `EventQueue` so
     /// cancelling the losing side never disturbs the underlying poll stream
     /// (see `EventQueue`'s doc comment for why the raw stream iterator
     /// cannot be raced directly).
@@ -539,6 +644,14 @@ public final class CardPaymentCoordinator: Sendable {
                         // (cache-busting params, re-issued nonces) for the
                         // same logical challenge throughout.
                         continue
+                    case let .attemptFailed(details):
+                        // Retryable soft-decline arriving
+                        // mid-race (e.g. a poll tick observes the server-side
+                        // reset while the challenge/redirect presenter is
+                        // still on screen): the attempt is dead, so stop
+                        // racing and let the outer switch dismiss the
+                        // stranded presenter.
+                        return .attemptFailed(details)
                     }
                 }
                 return .streamEnded
@@ -551,7 +664,7 @@ public final class CardPaymentCoordinator: Sendable {
             switch first {
             case .presented:
                 group.cancelAll()
-            case .sessionCompleted, .sessionFailed, .streamEnded:
+            case .sessionCompleted, .sessionFailed, .attemptFailed, .streamEnded:
                 await self.challengePresenter.dismiss()
                 group.cancelAll()
             }
@@ -595,6 +708,8 @@ public final class CardPaymentCoordinator: Sendable {
             return handleSessionCompleted(session)
         case let .sessionFailed(details):
             return handleSessionFailed(details, lastSession: lastSession)
+        case let .attemptFailed(details):
+            return handleAttemptFailed(details, lastSession: lastSession)
         case .streamEnded:
             // The poll stream finished before the presenter resolved on its
             // own; `dismiss()` already ran. Fall through to the outer loop,
@@ -629,7 +744,7 @@ public final class CardPaymentCoordinator: Sendable {
     public extension CardPaymentCoordinator {
         /// Convenience init that constructs the platform `ThreeDSCoordinator`
         /// for hosts that already have a UIKit navigation container.
-        /// Made public for demo target access; will be re-evaluated when MollieComponents umbrella ships in Phase 4.
+        /// Made public for demo target access; will be re-evaluated once the `MollieComponents` umbrella target ships.
         convenience init(
             sessionsClient: any HTTPClient,
             tokenizerClient: any HTTPClient,
@@ -640,7 +755,9 @@ public final class CardPaymentCoordinator: Sendable {
             challengeContainer: UINavigationChallengeContainer,
             pollingTimeoutSeconds: TimeInterval = 30,
             useCheckoutAttempts: Bool = true,
-            onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil
+            onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil,
+            onEvent: (@Sendable (ChannelEvent) -> Void)? = nil,
+            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil
         ) {
             // Pass `.infinity` for `pollingTimeoutSeconds` to disable the
             // session-polling timeout entirely — useful when an upstream UI
@@ -660,11 +777,13 @@ public final class CardPaymentCoordinator: Sendable {
                 challengeContainer: challengeContainer,
                 pollingSchedule: schedule,
                 useCheckoutAttempts: useCheckoutAttempts,
-                onSessionUpdate: onSessionUpdate
+                onSessionUpdate: onSessionUpdate,
+                onEvent: onEvent,
+                beforeSubmit: beforeSubmit
             )
         }
 
-        /// Convenience init for modal hosts (e.g. the Phase 4 payment sheet),
+        /// Convenience init for modal hosts (e.g. the payment sheet),
         /// which present the 3DS WebView from a `presentingViewController`
         /// instead of pushing onto a nav stack.
         convenience init(
@@ -677,7 +796,9 @@ public final class CardPaymentCoordinator: Sendable {
             challengeContainer: ViewControllerChallengeContainer,
             pollingTimeoutSeconds: TimeInterval = 30,
             useCheckoutAttempts: Bool = true,
-            onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil
+            onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil,
+            onEvent: (@Sendable (ChannelEvent) -> Void)? = nil,
+            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil
         ) {
             let schedule = PollingSchedule(
                 intervals: PollingSchedule.default.intervals,
@@ -694,7 +815,9 @@ public final class CardPaymentCoordinator: Sendable {
                 challengeContainer: challengeContainer,
                 pollingSchedule: schedule,
                 useCheckoutAttempts: useCheckoutAttempts,
-                onSessionUpdate: onSessionUpdate
+                onSessionUpdate: onSessionUpdate,
+                onEvent: onEvent,
+                beforeSubmit: beforeSubmit
             )
         }
     }

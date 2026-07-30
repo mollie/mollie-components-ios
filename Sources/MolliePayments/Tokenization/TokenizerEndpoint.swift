@@ -5,14 +5,14 @@ package enum TokenizerEndpoint {
     /// Charging POST that exchanges the PAN for a card token — **not
     /// auto-retried**.
     ///
-    /// Per spike #316 (Model B, token-as-anchor), the PCI tokeniser honours no
-    /// inbound idempotency header on `POST /v1/card-tokens`, so the SDK emits
-    /// none and never transparently retries it (POST is excluded from
-    /// `isIdempotent` in `TokenizerClient`). On an indeterminate failure the
-    /// SDK surfaces `.timeout`; the merchant reconciles server-side. In-process
-    /// re-taps are guarded by `SingleFlight` in `CardPaymentCoordinator`. See
-    /// decisions-log "2026-06-23 — Network idempotency model decided
-    /// (spike #316 resolved)".
+    /// Per the network-idempotency design (Model B, token-as-anchor), the PCI
+    /// tokeniser honours no inbound idempotency header on `POST
+    /// /v1/card-tokens`, so the SDK emits none and never transparently
+    /// retries it (POST is excluded from `isIdempotent` in
+    /// `TokenizerClient`). On an indeterminate failure the SDK surfaces
+    /// `.timeout`; the merchant reconciles server-side. In-process re-taps
+    /// are guarded by `SingleFlight` in `CardPaymentCoordinator`, per the
+    /// 2026-06-23 network-idempotency design decision.
     package static func tokenize(
         _ data: CardSubmissionData,
         profileToken: String,
@@ -69,8 +69,7 @@ extension TokenizeRequest: CustomDebugStringConvertible {
 // MARK: - Tokenisation-Agent header
 
 /// Identifies the iOS SDK to the PCI tokeniser. Schema mirrors the Java record
-/// `TokenisationAgentHeader` server-side. See docs/mvp/modules/02-mollie-payments.md
-/// for the contract.
+/// `TokenisationAgentHeader` server-side.
 package enum TokenisationAgentHeader {
     package static let headerName = "Tokenisation-Agent"
 

@@ -22,27 +22,15 @@ Or in Xcode: **File → Add Package Dependencies…** → paste the repo URL.
 
 The SDK is distributed exclusively via Swift Package Manager.
 
-## Modules
-
-| Module | Purpose | Dependencies |
-|--------|---------|--------------|
-| `MollieCore` | Networking, errors, models, session infrastructure | — |
-| `MolliePayments` | Card tokenization, IIN lookup, session orchestration, 3DS | `MollieCore` |
-| `MolliePaymentsUI` | Card form UI, secure text fields, validation, theming | `MollieCore`, `MolliePayments` |
-| `MollieComponents` | Public entry point — `MolliePaymentSheet.present(...)` | All of the above |
-
-Merchants import only `MollieComponents`. The sub-modules are available for advanced integrations.
-
 ## Quick start
+
+`MollieComponents` is the only library the package exposes — a single `import MollieComponents` gives you `MollieCheckout`, the payment-sheet and card-form surfaces, and every public type you need.
 
 ```swift
 import MollieComponents
 
-let result = await MolliePaymentSheet.present(
-    from: viewController,
-    clientToken: token,
-    theme: MolliePaymentTheme()
-)
+let checkout = try MollieCheckout(clientToken: token)
+let result = await checkout.presentCard(from: viewController)
 
 switch result {
 case .completed(let payment): break // success

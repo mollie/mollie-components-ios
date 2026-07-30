@@ -1,15 +1,18 @@
 SCHEME          := MollieComponents-Package
 DEMO_SCHEME     := MollieCheckoutDemo
 SIMULATOR       := generic/platform=iOS Simulator
+# Device-generic, unsigned destination — mirrors the CI gate's BUILD_DESTINATION
+# (.gitlab-ci.yml) so `make build-xcode` and the xcodebuild-build job stay in lockstep.
+BUILD_DESTINATION := generic/platform=iOS
 
-.PHONY: ci ci-fast lint test build build-xcode docs docs-html xcframework example-build-public mint-demo-token
+.PHONY: ci ci-fast lint check-prose test build build-xcode docs docs-html xcframework example-build-public mint-demo-token
 
 # ── Full pipeline (mirrors GitLab CI stages) ─────────────────────────────────
 
-ci: lint test build build-xcode xcframework
+ci: lint check-prose test build build-xcode xcframework
 
 # Skips xcframework (slow, ~5–10 min) — use for quick iteration
-ci-fast: lint test build build-xcode
+ci-fast: lint check-prose test build build-xcode
 
 # ── Individual stages ────────────────────────────────────────────────────────
 
@@ -17,16 +20,26 @@ lint:
 	swiftlint --strict
 	swiftformat --lint Sources/ Tests/
 
+# Leak gate for the public GitHub mirror: greps every file that ships for
+# competitor brand names, Jira keys and internal codenames. Same patterns the
+# release-time verify-public-tree.sh applies, so a violation fails here (on an
+# MR, in ~1s) instead of at release-tag time. Mirrors the CI eas-docs job.
+check-prose:
+	bash scripts/publish/check-shipped-prose.sh
+
 test:
 	swift test --enable-code-coverage
 
 build:
 	swift build -c release
 
+# Single-destination smoke build for the CI gate: device-generic + unsigned.
+# NOTE: the xcframework target (below) deliberately builds BOTH device AND
+# Simulator slices via build-xcframework.sh — that is not a divergence to "fix".
 build-xcode:
 	xcodebuild build \
 		-scheme "$(SCHEME)" \
-		-destination "$(SIMULATOR)" \
+		-destination "$(BUILD_DESTINATION)" \
 		-configuration Debug \
 		CODE_SIGNING_ALLOWED=NO
 

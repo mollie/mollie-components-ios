@@ -33,6 +33,15 @@
             </array>
         </dict>
     </array>
+    <!--
+        No required-reason API declaration is warranted. A source scan of the
+        PusherSwift 10.1.10 transport, its NWWebSocket 0.5.10 and TweetNacl 1.2.0
+        transitive deps, and every shipping SDK target found NO UserDefaults,
+        system-boot-time, file-timestamp, or disk-space required-reason API
+        usage. The only code in this repository that touches UserDefaults lives
+        in a debug-only target that is excluded from the released package, so it
+        is not part of any shipped binary.
+    -->
     <key>NSPrivacyAccessedAPITypes</key>
     <array/>
 </dict>

@@ -98,7 +98,9 @@ import MollieCore
                   let dict = body as? [String: Any],
                   let sender = dict["sender"] as? String, sender == "mollie-interceptor",
                   let type = dict["type"] as? String else { return nil }
-            if type == "challenge" { return .challengeEscalation }
+            if type == "challenge" {
+                return .challengeEscalation
+            }
             guard let result = parse(name: name, body: body) else { return nil }
             return .result(result)
         }

@@ -60,7 +60,7 @@
         /// the field border so the hint reads as part of the form chrome
         /// (not as an interactive element); the digit label uses the
         /// text colour at 60% alpha so it stays a hint, not a focus.
-        package func applyTheme(_ theme: MolliePaymentTheme) {
+        package func applyTheme(_ theme: MollieAppearance) {
             let chrome = theme.colors.fieldBorder.uiColor
             layer.borderColor = chrome.cgColor
             stripeLayer.backgroundColor = chrome.cgColor

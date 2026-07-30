@@ -16,7 +16,9 @@ package actor IINLookupService {
         pendingTask?.cancel()
         let task = Task<IINResult?, Never> { [httpClient, debounceInterval] in
             try? await Task.sleep(nanoseconds: UInt64(debounceInterval * 1_000_000_000))
-            if Task.isCancelled { return nil }
+            if Task.isCancelled {
+                return nil
+            }
             return try? await httpClient.perform(IINEndpoint.lookup(prefix: prefix))
         }
         pendingTask = task

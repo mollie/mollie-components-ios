@@ -56,5 +56,95 @@
             field.sendActions(for: .editingChanged)
             XCTAssertEqual(field.text, "4242424242424242")
         }
+
+        // MARK: - Brand-aware formatting
+
+        // Static, directly testable: `sendActions(.editingChanged)` doesn't
+        // reliably fire target-action in this repo's headless UIKit test
+        // harness.
+
+        func test_format_visa16Digit_groupsFourFourFourFour() {
+            XCTAssertEqual(
+                CardNumberTextField.format("4242424242424242"),
+                "4242 4242 4242 4242"
+            )
+        }
+
+        func test_format_amex15Digit_groupsFourSixFive() {
+            // 34/37 prefix -> Amex -> 4-6-5 grouping, 15-digit max.
+            XCTAssertEqual(
+                CardNumberTextField.format("378282246310005"),
+                "3782 822463 10005"
+            )
+        }
+
+        func test_format_dinersClub14Digit_groupsFourFourFourTwo() {
+            // 36 prefix -> Diners Club -> the 4-6-4 special was dropped
+            // since it can't represent the
+            // 16-19 digit co-badged PANs the shared 19-digit cap now
+            // allows through; Diners now groups in 4s like every other
+            // non-Amex scheme.
+            XCTAssertEqual(
+                CardNumberTextField.format("36070000000010"),
+                "3607 0000 0000 10"
+            )
+        }
+
+        func test_format_dinersClub16Digit_preservedNotTruncatedToFourteen() {
+            // Real-world 16-digit Diners BIN-36 PAN (co-badged range) must
+            // survive the field's cap in full — the bug this fix corrects
+            // silently dropped the last two digits, which then failed Luhn
+            // with a misleading "check for typos" error.
+            XCTAssertEqual(
+                CardNumberTextField.format("3670000000000015"),
+                "3670 0000 0000 0015"
+            )
+        }
+
+        func test_format_visa_overLength_truncatesToNineteenDigits() {
+            // 20 raw digits typed against a Visa (4-prefix) BIN must hard-cap
+            // at 19 digits (the PCI/validator ceiling) rather than grouping
+            // the overflow.
+            XCTAssertEqual(
+                CardNumberTextField.format("4242424242424242123456"),
+                "4242 4242 4242 4242 123"
+            )
+        }
+
+        func test_format_visa19Digit_isPreservedNotTruncated() {
+            // A legitimate 19-digit PAN (the top of the 13-19 digit range
+            // `CardFormValidator` accepts) must not lose any digits.
+            XCTAssertEqual(
+                CardNumberTextField.format("4242424242424242123"),
+                "4242 4242 4242 4242 123"
+            )
+        }
+
+        func test_format_amex_overLength_truncatesToFifteenDigits() {
+            XCTAssertEqual(
+                CardNumberTextField.format("3782822463100059999"),
+                "3782 822463 10005"
+            )
+        }
+
+        func test_format_stripsLettersBeforeGrouping() {
+            XCTAssertEqual(
+                CardNumberTextField.format("4242abc4242"),
+                "4242 4242"
+            )
+        }
+
+        func test_format_empty_returnsEmpty() {
+            XCTAssertEqual(CardNumberTextField.format(""), "")
+        }
+
+        func test_format_unknownPrefix_defaultsToFourDigitGrouping() {
+            // No known BIN range matches a leading `9` — falls back to the
+            // generic 4-4-4-4 grouping / 19-digit cap.
+            XCTAssertEqual(
+                CardNumberTextField.format("9999999999999999"),
+                "9999 9999 9999 9999"
+            )
+        }
     }
 #endif

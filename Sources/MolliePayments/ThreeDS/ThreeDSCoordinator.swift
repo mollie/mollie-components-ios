@@ -6,7 +6,7 @@
     /// onto a host `UINavigationController` and reports user-initiated pops
     /// (back button / interactive pop gesture) back to the coordinator so the
     /// awaiting continuation can resolve as `.cancelled`.
-    /// Made public for demo target access; will be re-evaluated when MollieComponents umbrella ships in Phase 4.
+    /// Made public for demo target access; will be re-evaluated once the `MollieComponents` umbrella target ships.
     public final class UINavigationChallengeContainer: NSObject, @unchecked Sendable {
         let navigationController: UINavigationController
         /// Set by `ThreeDSCoordinator` while a challenge VC is on the stack.
@@ -75,7 +75,7 @@
 
         /// Set while a presentation is in flight; torn down by `dismiss()`.
         ///
-        /// PXP-5009: `CardPaymentCoordinator.drainEvents` races this
+        /// `CardPaymentCoordinator.drainEvents` races this
         /// presenter against continued poll-stream draining, because a
         /// frictionless hosted 3DS page completes the payment server-side
         /// without ever navigating to the return URL or firing the
@@ -141,7 +141,7 @@
                                    in container: any ChallengeContainer) async -> ThreeDSResult
         {
             // swiftlint:enable opening_brace cyclomatic_complexity
-            // Modal path — preferred for Phase 4 sheet-based UI. Presents the
+            // Modal path — preferred for sheet-based UI. Presents the
             // 3DS WebView modally from a host VC; swipe-to-dismiss resolves
             // `.cancelled` via `ModalDismissDelegate`. A 5-minute watchdog
             // guards against ACS pages that never call back.
@@ -199,7 +199,7 @@
                     }
                     webVC.onNeedsPresentation = present
 
-                    // Wired for `dismiss()` (PXP-5009 poll-race): tears down
+                    // Wired for `dismiss()` (poll-race): tears down
                     // whatever is currently showing (presented modal, or the
                     // hidden off-screen host) and resolves `.cancelled`.
                     activeDismiss = { [weak webVC] in
@@ -246,7 +246,9 @@
                     // resolves — the watchdog is cancelled on resolve, releasing it.
                     watchdogTask = Task { [webVC] in
                         try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-                        if Task.isCancelled { return }
+                        if Task.isCancelled {
+                            return
+                        }
                         if !resolver.hasResolved {
                             await MainActor.run {
                                 if let nav = presentedNav {
@@ -286,7 +288,7 @@
                     resolver.resolve(emitting: .cancelled)
                 }
 
-                // Wired for `dismiss()` (PXP-5009 poll-race): pops the pushed
+                // Wired for `dismiss()` (poll-race): pops the pushed
                 // challenge VC (if still on top) and resolves `.cancelled`.
                 activeDismiss = { [weak uiContainer, weak webVC] in
                     guard let uiContainer, let webVC else {

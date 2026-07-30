@@ -86,7 +86,7 @@ final class TokenizerClientTests: XCTestCase {
         }
     }
 
-    // MARK: - Idempotency contract (epic 315 / spike #316, Model B)
+    // MARK: - Idempotency contract (Model B)
 
     //
     // GUARD TESTS — these pin the no-header / no-auto-retry contract for the
@@ -95,10 +95,9 @@ final class TokenizerClientTests: XCTestCase {
     // client's POST retry behaviour these assert is exactly what governs
     // `tokenize`. They pass against current behaviour by design: POST is
     // excluded from `isIdempotent` (TokenizerClient.swift) and the SDK emits no
-    // idempotency header — the PCI tokeniser honours none (spike #316). The
-    // point is regression protection: auto-retrying a tokenise charge or adding
-    // an idempotency header turns these red. See decisions-log "2026-06-23 —
-    // Network idempotency model decided (spike #316 resolved)".
+    // idempotency header — the PCI Tokeniser honours none. The point is
+    // regression protection: auto-retrying a tokenise charge or adding an
+    // idempotency header turns these red.
 
     func test_tokenize_urlError_doesNotRetry_chargingPostNotIdempotent() async {
         // A transient retryable URLError on the tokenise POST must result in
@@ -148,7 +147,7 @@ final class TokenizerClientTests: XCTestCase {
         // (already covered above): .notConnectedToInternet is in RetryPolicy's
         // retryableCodes set, so this proves the POST-not-retried gate holds
         // across every retryable URLError — not just timeout — and the error
-        // surfaces as MollieError.network. Distinct from #317's .timedOut guard.
+        // surfaces as MollieError.network, distinct from the .timedOut guard covered above.
         var callCount = 0
         MockURLProtocol.handler = { _ in
             callCount += 1

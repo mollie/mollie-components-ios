@@ -1,20 +1,18 @@
 import MollieComponents
-import MolliePaymentsUI
 import SwiftUI
 
 // MARK: - Integration shape: embedded SwiftUI card form
 
 //
 // When you want the card form INLINE in your own checkout layout (rather
-// than a modal sheet), drop `MolliePaymentCardFormView` straight into the
+// than a modal sheet), drop `MollieCardComponent` straight into the
 // view tree. It renders the SDK card fields and its own "Pay with card"
 // button; on any terminal state `onResult` fires exactly once with a
 // `MolliePaymentResult`.
 //
-// Defaults used here:
-//   • theme:     omitted → the Mollie-branded default theme.
-//   • endpoints omitted → Mollie production, which is the default. A
-//                merchant app never overrides this.
+// Appearance always renders with the Mollie-branded default theme — there is
+// no public way to override it. Endpoints default to Mollie production; a
+// merchant app never overrides this.
 
 struct CardFormExample: View {
     /// STEP 1 — Get a client access token (pasted here; from your backend in
@@ -54,7 +52,7 @@ struct CardFormExample: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 } else {
-                    MolliePaymentCardFormView(
+                    MollieCardComponent(
                         clientToken: clientAccessToken
                     ) { paymentResult in
                         // STEP 4 — Handle the terminal result.
