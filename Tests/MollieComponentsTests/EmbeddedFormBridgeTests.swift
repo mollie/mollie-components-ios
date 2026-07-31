@@ -43,6 +43,7 @@
                 rawClientToken: "irrelevant_for_these_tests",
                 theme: MollieAppearance(),
                 endpoints: .production,
+                locale: .current,
                 onResult: onResult
             )
         }

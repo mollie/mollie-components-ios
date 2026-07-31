@@ -14,8 +14,26 @@
             fatalError("CVCTextField does not support NSCoder")
         }
 
+        /// Locale-specific `.lproj` sub-bundle resolved by
+        /// `MollieCardFormViewController` from the merchant's (possibly
+        /// overridden) locale. See `CardholderTextField.localizedBundle`
+        /// for the full rationale. Also feeds `accessibilityLabel`, which
+        /// re-resolves on every access rather than caching.
+        package var localizedBundle: Bundle? {
+            didSet {
+                placeholder = MollieLocalizedString(
+                    "card.cvc.placeholder",
+                    bundle: localizedBundle,
+                    comment: "Placeholder for the card-security-code (CVC/CVV) field."
+                )
+            }
+        }
+
         private func configure() {
-            placeholder = "CVC"
+            placeholder = MollieLocalizedString(
+                "card.cvc.placeholder",
+                comment: "Placeholder for the card-security-code (CVC/CVV) field."
+            )
             keyboardType = .numberPad
             autocorrectionType = .no
             spellCheckingType = .no
@@ -67,11 +85,20 @@
             set { super.accessibilityValue = newValue }
         }
 
-        /// Override the label so the spoken label clearly signals secure
-        /// entry; the default would just speak "CVC" with no indication
-        /// that the value will be masked.
+        /// Override the label so the spoken label is a clear, human-readable
+        /// name for the field rather than the raw "CVC" placeholder. The
+        /// field deliberately does NOT use `isSecureTextEntry` (masking is
+        /// applied via `accessibilityValue` above instead), so the label
+        /// must not claim "secure entry" — that would misrepresent how the
+        /// field actually behaves to assistive tech users.
         override package var accessibilityLabel: String? {
-            get { "Security code, secure entry" }
+            get {
+                MollieLocalizedString(
+                    "card.cvc.accessibilityLabel",
+                    bundle: localizedBundle,
+                    comment: "Accessibility label for the CVC field."
+                )
+            }
             set { super.accessibilityLabel = newValue }
         }
 

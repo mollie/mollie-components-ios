@@ -757,7 +757,8 @@ public final class CardPaymentCoordinator: Sendable {
             useCheckoutAttempts: Bool = true,
             onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil,
             onEvent: (@Sendable (ChannelEvent) -> Void)? = nil,
-            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil
+            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil,
+            locale: Locale = .current
         ) {
             // Pass `.infinity` for `pollingTimeoutSeconds` to disable the
             // session-polling timeout entirely — useful when an upstream UI
@@ -773,7 +774,7 @@ public final class CardPaymentCoordinator: Sendable {
                 sessionToken: sessionToken,
                 profileToken: profileToken,
                 testmode: testmode,
-                challengePresenter: ThreeDSCoordinator(),
+                challengePresenter: ThreeDSCoordinator(locale: locale),
                 challengeContainer: challengeContainer,
                 pollingSchedule: schedule,
                 useCheckoutAttempts: useCheckoutAttempts,
@@ -798,7 +799,8 @@ public final class CardPaymentCoordinator: Sendable {
             useCheckoutAttempts: Bool = true,
             onSessionUpdate: (@Sendable (SessionResponse) -> Void)? = nil,
             onEvent: (@Sendable (ChannelEvent) -> Void)? = nil,
-            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil
+            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil,
+            locale: Locale = .current
         ) {
             let schedule = PollingSchedule(
                 intervals: PollingSchedule.default.intervals,
@@ -811,7 +813,7 @@ public final class CardPaymentCoordinator: Sendable {
                 sessionToken: sessionToken,
                 profileToken: profileToken,
                 testmode: testmode,
-                challengePresenter: ThreeDSCoordinator(),
+                challengePresenter: ThreeDSCoordinator(locale: locale),
                 challengeContainer: challengeContainer,
                 pollingSchedule: schedule,
                 useCheckoutAttempts: useCheckoutAttempts,

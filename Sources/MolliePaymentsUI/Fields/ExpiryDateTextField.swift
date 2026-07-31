@@ -16,8 +16,25 @@
             fatalError("ExpiryDateTextField does not support NSCoder")
         }
 
+        /// Locale-specific `.lproj` sub-bundle resolved by
+        /// `MollieCardFormViewController` from the merchant's (possibly
+        /// overridden) locale. See `CardholderTextField.localizedBundle`
+        /// for the full rationale.
+        package var localizedBundle: Bundle? {
+            didSet {
+                placeholder = MollieLocalizedString(
+                    "card.expiry.placeholder",
+                    bundle: localizedBundle,
+                    comment: "Placeholder for the card-expiry field, showing the expected month/year format."
+                )
+            }
+        }
+
         private func configure() {
-            placeholder = "MM/YY"
+            placeholder = MollieLocalizedString(
+                "card.expiry.placeholder",
+                comment: "Placeholder for the card-expiry field, showing the expected month/year format."
+            )
             keyboardType = .numberPad
             autocorrectionType = .no
             spellCheckingType = .no

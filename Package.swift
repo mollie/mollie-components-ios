@@ -4,6 +4,7 @@ import PackageDescription
 
 let package = Package(
     name: "MollieComponents",
+    defaultLocalization: "en",
     platforms: [
         .iOS(.v16),
         .macOS(.v13),
@@ -31,7 +32,10 @@ let package = Package(
             name: "MolliePayments",
             dependencies: ["MollieCore"],
             path: "Sources/MolliePayments",
-            resources: [.copy("PrivacyInfo.xcprivacy")]
+            resources: [
+                .copy("PrivacyInfo.xcprivacy"),
+                .process("Resources"),
+            ]
         ),
         .target(
             name: "MolliePaymentsUI",
@@ -44,6 +48,7 @@ let package = Package(
             resources: [
                 .process("Brands.xcassets"),
                 .copy("PrivacyInfo.xcprivacy"),
+                .process("Resources"),
             ]
         ),
         .target(

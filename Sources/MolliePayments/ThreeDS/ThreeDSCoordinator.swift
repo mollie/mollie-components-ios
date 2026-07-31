@@ -88,7 +88,16 @@
         /// the 5-minute watchdog.
         private var activeDismiss: (@MainActor () -> Void)?
 
-        init() {}
+        /// Resolved UI locale threaded from `CardPaymentCoordinator`, in
+        /// turn from `MollieCheckout`/`MollieCardComponent`'s resolved
+        /// locale. Threaded into `ThreeDSWebViewController`, whose
+        /// `threeds.title`/`status.authenticating`/`cancel` copy is resolved
+        /// from this locale via `MolliePaymentsBundleLocator.localizedBundle(for:)`.
+        private let locale: Locale
+
+        init(locale: Locale = .current) {
+            self.locale = locale
+        }
 
         func dismiss() async {
             await MainActor.run { [weak self] in
@@ -166,7 +175,8 @@
                         challengeURL: challengeURL,
                         merchantReturnURL: merchantReturnURL,
                         revealPolicy: revealPolicy,
-                        presentOnDemand: true
+                        presentOnDemand: true,
+                        locale: locale
                     )
 
                     // Shared main-actor reference to the modal once (if) presented.
@@ -275,7 +285,11 @@
                 )
             }
             return await withCheckedContinuation { (continuation: CheckedContinuation<ThreeDSResult, Never>) in
-                let webVC = ThreeDSWebViewController(challengeURL: challengeURL, revealPolicy: revealPolicy)
+                let webVC = ThreeDSWebViewController(
+                    challengeURL: challengeURL,
+                    revealPolicy: revealPolicy,
+                    locale: locale
+                )
                 let resolver = ContinuationResolver(continuation: continuation) { [weak self] in
                     Task { @MainActor in
                         self?.activeDismiss = nil

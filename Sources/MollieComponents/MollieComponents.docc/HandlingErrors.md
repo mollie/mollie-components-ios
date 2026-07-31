@@ -25,7 +25,7 @@ case .cancelled:
 
 ``MolliePaymentResult/cancelled`` is a **normal terminal state**, distinct from ``MolliePaymentResult/failed(_:)``. It fires when the cardholder dismisses the sheet, taps cancel, or the presenting context is torn down. Do not surface it as an error, log it as a failure, or retry automatically — treat it the way you would a user backing out of any modal. (The underlying `MollieError` cancellation cases listed under [Reserved](#Reserved) are never delivered to you; cancellation always surfaces here.)
 
-> Note: The `errorDescription` strings on `MollieError` are developer- and log-facing copy. They are not localized for cardholders — map each case to your own UI strings using the table below.
+> Note: The `errorDescription` strings on `MollieError` are developer- and log-facing copy. They are not localized for cardholders — map each case to your own UI strings using the table below. This is unaffected by the SDK's own localization support: the cardholder-facing chrome the SDK renders itself (the card form and 3-D Secure screen) is localized and follows the `locale` you pass to ``MollieCheckout``'s `init(clientToken:locale:beforeSubmit:)` (default: the device locale), but `MollieError` deliberately stays English so it's safe as log/support copy regardless of the cardholder's locale.
 
 ## Merchant-reachable cases
 

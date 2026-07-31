@@ -26,6 +26,12 @@
         private let clientToken: String
         private let theme: MollieAppearance
         private let endpoints: MollieEndpoints
+        /// Resolved once at init time via `CardCheckoutRunner.resolveLocale(override:)`
+        /// — merchant override (when threaded from `MollieCheckout`) wins over
+        /// the device locale. Not a public parameter: the standalone
+        /// `MollieCardComponent(clientToken:onResult:)` init always resolves
+        /// against `.current` (no override), matching its pinned signature.
+        private let locale: Locale
         /// Non-nil only for the internal init used by
         /// `MollieCheckout.makeCardComponent(onResult:)`.
         private let checkoutEventSink: (@Sendable (MollieCheckoutEvent) -> Void)?
@@ -50,6 +56,9 @@
             // surface at all. Mirrors `MollieCheckout`'s init lockdown: no
             // `endpoints:` parameter on the public surface.
             endpoints = .production
+            // No merchant override available on this pinned signature —
+            // resolves against the device locale only.
+            locale = CardCheckoutRunner.resolveLocale(override: nil)
             checkoutEventSink = nil
             beforeSubmit = nil
             self.onFieldEvent = onFieldEvent
@@ -68,12 +77,14 @@
             endpoints: MollieEndpoints = .production,
             checkoutEventSink: @escaping @Sendable (MollieCheckoutEvent) -> Void,
             beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil,
+            locale: Locale = .current,
             onFieldEvent: ((MollieCardFieldEvent) -> Void)? = nil,
             onResult: @escaping (MolliePaymentResult) -> Void
         ) {
             self.clientToken = clientToken
             self.theme = theme
             self.endpoints = endpoints
+            self.locale = locale
             self.checkoutEventSink = checkoutEventSink
             self.beforeSubmit = beforeSubmit
             self.onFieldEvent = onFieldEvent
@@ -88,6 +99,7 @@
                     rawClientToken: clientToken,
                     theme: theme,
                     endpoints: endpoints,
+                    locale: locale,
                     checkoutEventSink: checkoutEventSink,
                     beforeSubmit: beforeSubmit,
                     onFieldEvent: onFieldEvent,
@@ -113,6 +125,7 @@
         let rawClientToken: String
         let theme: MollieAppearance
         let endpoints: MollieEndpoints
+        let locale: Locale
         let checkoutEventSink: (@Sendable (MollieCheckoutEvent) -> Void)?
         let beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)?
         let onFieldEvent: ((MollieCardFieldEvent) -> Void)?
@@ -125,6 +138,7 @@
                 rawClientToken: rawClientToken,
                 theme: theme,
                 endpoints: endpoints,
+                locale: locale,
                 checkoutEventSink: checkoutEventSink,
                 beforeSubmit: beforeSubmit,
                 onResult: onResult
@@ -132,7 +146,7 @@
         }
 
         func makeUIViewController(context: Context) -> MollieCardFormViewController {
-            let form = MollieCardFormViewController(theme: theme)
+            let form = MollieCardFormViewController(theme: theme, locale: locale)
             let coordinator = context.coordinator
             coordinator.formViewController = form
             form.onSubmit = { snapshot in
@@ -194,6 +208,7 @@
         let rawClientToken: String
         let theme: MollieAppearance
         let endpoints: MollieEndpoints
+        let locale: Locale
 
         private var onResult: ((MolliePaymentResult) -> Void)?
         /// Optional sink fed the non-terminal `ChannelEvent` ticks observed
@@ -222,6 +237,7 @@
             rawClientToken: String,
             theme: MollieAppearance,
             endpoints: MollieEndpoints,
+            locale: Locale,
             checkoutEventSink: (@Sendable (MollieCheckoutEvent) -> Void)? = nil,
             beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil,
             onResult: @escaping (MolliePaymentResult) -> Void
@@ -230,6 +246,7 @@
             self.rawClientToken = rawClientToken
             self.theme = theme
             self.endpoints = endpoints
+            self.locale = locale
             self.checkoutEventSink = checkoutEventSink
             self.beforeSubmit = beforeSubmit
             self.onResult = onResult
@@ -303,7 +320,8 @@
                     }
                     sink?(event)
                 },
-                beforeSubmit: beforeSubmit
+                beforeSubmit: beforeSubmit,
+                locale: locale
             )
         }
 

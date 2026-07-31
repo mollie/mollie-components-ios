@@ -650,6 +650,60 @@
             XCTAssertTrue(requested, "Watchdog must request presentation when no event arrives")
         }
 
+        // MARK: - Localization (locale-threading work)
+
+        func test_explicitDutchLocale_winsOverSystemLocale_forTitleAndCoverCopy() throws {
+            // Mirrors `CardFormViewControllerLocaleTests`: an explicit merchant
+            // `locale:` override must resolve the nl.lproj bundle for this
+            // controller's own copy (title, cover label, cover Cancel button),
+            // independent of the test process's own system/preferred languages.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000),
+                locale: Locale(identifier: "nl")
+            )
+            _ = controller.view
+
+            XCTAssertEqual(controller.title, "3-D Secure")
+
+            let cover = try XCTUnwrap(Mirror(reflecting: controller).descendant("coverView") as? UIView)
+            let label = try XCTUnwrap(Self.firstLabel(in: cover))
+            XCTAssertEqual(label.text, "Veilig verifiëren…")
+            let cancel = try XCTUnwrap(Self.firstButton(in: cover))
+            XCTAssertEqual(cancel.title(for: .normal), "Annuleren")
+        }
+
+        func test_englishLocale_resolvesEnglishCopy() throws {
+            // Explicit `en` override: keeps this deterministic regardless of
+            // the test runner's own system/preferred locale, now that nl/fr/de
+            // catalogs also ship and `.current` could otherwise resolve one of
+            // those on a non-English runner.
+            let url = try XCTUnwrap(URL(string: "https://example.com/challenge"))
+            let controller = ThreeDSWebViewController(
+                challengeURL: url,
+                revealPolicy: .challengeDriven(watchdog: 1000),
+                locale: Locale(identifier: "en")
+            )
+            _ = controller.view
+            XCTAssertEqual(controller.title, "3-D Secure")
+            let cover = try XCTUnwrap(Mirror(reflecting: controller).descendant("coverView") as? UIView)
+            let cancel = try XCTUnwrap(Self.firstButton(in: cover))
+            XCTAssertEqual(cancel.title(for: .normal), "Cancel")
+        }
+
+        private static func firstLabel(in view: UIView) -> UILabel? {
+            for sub in view.subviews {
+                if let label = sub as? UILabel {
+                    return label
+                }
+                if let found = firstLabel(in: sub) {
+                    return found
+                }
+            }
+            return nil
+        }
+
         private static func firstButton(in view: UIView) -> UIButton? {
             for sub in view.subviews {
                 if let button = sub as? UIButton {

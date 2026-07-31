@@ -15,6 +15,28 @@
     /// they stay in lockstep without duplicating the `CardPaymentCoordinator`
     /// construction and session-emit bookkeeping.
     enum CardCheckoutRunner {
+        /// Resolves the effective UI locale for a checkout session: the
+        /// merchant's `override` (from `MollieCheckout(locale:)`) if it — or
+        /// its base language — matches a shipped `.lproj` catalog, otherwise
+        /// the system locale's match, falling back to `en`. Single source of
+        /// truth so `MollieCheckout` and `MollieCardComponent` resolve
+        /// identically; both thread the result into `MollieCardFormViewController`
+        /// and this file's `submit(...)` rather than re-deriving it.
+        ///
+        /// `available` is the INTERSECTION of `MolliePaymentsUI`'s and
+        /// `MolliePayments`'s shipped localizations, not just the card form's:
+        /// the resolved locale also drives `ThreeDSWebViewController`'s copy
+        /// (via `MolliePaymentsBundleLocator`), so a locale only counts as
+        /// "available" if both surfaces ship it — otherwise the card form and
+        /// the 3DS screen could end up rendering different languages. If the
+        /// catalogs ever diverge, both fall back to `en` together instead.
+        static func resolveLocale(override: Locale?) -> Locale {
+            let cardFormLocalizations = Set(MolliePaymentsUIBundleLocator.resourcesBundle.localizations)
+            let threeDSLocalizations = Set(MolliePaymentsBundleLocator.resourcesBundle.localizations)
+            let available = Array(cardFormLocalizations.intersection(threeDSLocalizations)).filter { $0 != "Base" }
+            return MollieLocaleResolver.resolve(override: override, system: .current, availableIdentifiers: available)
+        }
+
         /// Pure decode path, exposed for unit-test access without UIKit.
         static func decode(clientToken: String) -> Result<ClientToken, MollieError> {
             do {
@@ -72,7 +94,8 @@
             endpoints: MollieEndpoints,
             presentingViewController: UIViewController,
             checkoutEventSink: (@Sendable (MollieCheckoutEvent) -> Void)?,
-            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)?
+            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)?,
+            locale: Locale = .current
         ) async -> MolliePaymentResult {
             let container = ViewControllerChallengeContainer(presentingViewController: presentingViewController)
             // Capture the most-recently observed session so we can surface its
@@ -105,7 +128,8 @@
                     else { return }
                     checkoutEventSink(mapped)
                 },
-                beforeSubmit: beforeSubmit
+                beforeSubmit: beforeSubmit,
+                locale: locale
             )
             let cardResult = await coordinator.submit(submission)
             if case .attemptFailed = cardResult {

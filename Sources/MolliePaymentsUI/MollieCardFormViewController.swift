@@ -56,10 +56,39 @@
         /// that's resolved.
         private let iinLookupService: IINLookupService?
 
-        package init(theme: MollieAppearance = MollieAppearance(), iinLookupService: IINLookupService? = nil) {
+        /// Locale-specific `.lproj` sub-bundle resolved once at init from
+        /// the caller's `locale`, via `MolliePaymentsUIBundleLocator
+        /// .localizedBundle(for:)`. Threaded into every localized-string
+        /// call site (fields, section labels, pay button, validation
+        /// messages) instead of relying on `NSLocalizedString`'s default
+        /// system-preferred-language selection, so a merchant-supplied
+        /// locale override (`MollieCheckout(locale:)`) actually changes
+        /// what the form displays even when it doesn't match the device's
+        /// preferred languages.
+        private let localizedBundle: Bundle
+
+        package init(
+            theme: MollieAppearance = MollieAppearance(),
+            locale: Locale = .current,
+            iinLookupService: IINLookupService? = nil
+        ) {
             self.theme = theme
             self.iinLookupService = iinLookupService
+            localizedBundle = MolliePaymentsUIBundleLocator.localizedBundle(for: locale)
             super.init(nibName: nil, bundle: nil)
+            applyLocalizedBundleToFields()
+        }
+
+        /// Injects `localizedBundle` into the four field subclasses. Must
+        /// run AFTER `super.init()` — the fields already exist as
+        /// eagerly-initialized stored properties by then, but touching
+        /// `self.cardholderField` etc. before `super.init()` returns is not
+        /// allowed.
+        private func applyLocalizedBundleToFields() {
+            cardholderField.localizedBundle = localizedBundle
+            cardNumberField.localizedBundle = localizedBundle
+            expiryField.localizedBundle = localizedBundle
+            cvcField.localizedBundle = localizedBundle
         }
 
         @available(*, unavailable)
@@ -179,6 +208,7 @@
                 cvcField: cvcField,
                 cardholderField: cardholderField
             )
+            grouped.applyLocalizedBundle(localizedBundle)
             groupedFormView = grouped
 
             // Per-field height + dynamic type stays here — the grouped view
@@ -215,7 +245,13 @@
         }
 
         private func configureSubmit() {
-            payButton.setTitle("Pay with card")
+            payButton.setTitle(
+                MollieLocalizedString(
+                    "form.payButton.title",
+                    bundle: localizedBundle,
+                    comment: "Title of the primary call-to-action button that submits the card form."
+                )
+            )
             payButton.onTap = { [weak self] in self?.handleSubmit() }
             // Re-evaluate validity on every keystroke, and clear (never
             // introduce) a field's caption once its value becomes valid.
@@ -393,7 +429,7 @@
         private func currentFieldErrors() -> [CardField: String] {
             Dictionary(
                 uniqueKeysWithValues: CardFormValidator.validateAll(snapshot: currentSnapshot())
-                    .map { ($0.fieldKind, $0.userMessage) }
+                    .map { ($0.fieldKind, $0.userMessage(bundle: localizedBundle)) }
             )
         }
 
@@ -422,7 +458,7 @@
         }
 
         private func announcementSummary(for errors: [CardFormValidator.ValidationError]) -> String {
-            errors.map(\.userMessage).joined(separator: " ")
+            errors.map { $0.userMessage(bundle: localizedBundle) }.joined(separator: " ")
         }
 
         /// Submit-time validation. Unlike the live submit-button gate
@@ -438,7 +474,9 @@
         @discardableResult
         package func validateAndDisplayAll() -> Bool {
             let errors = CardFormValidator.validateAll(snapshot: currentSnapshot())
-            displayedFieldErrors = Dictionary(uniqueKeysWithValues: errors.map { ($0.fieldKind, $0.userMessage) })
+            displayedFieldErrors = Dictionary(
+                uniqueKeysWithValues: errors.map { ($0.fieldKind, $0.userMessage(bundle: localizedBundle)) }
+            )
             groupedFormView?.showFieldErrors(displayedFieldErrors)
             guard let firstError = errors.first else { return true }
             focusField(for: firstError)

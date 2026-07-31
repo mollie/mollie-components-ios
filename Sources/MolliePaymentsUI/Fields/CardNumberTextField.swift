@@ -15,8 +15,25 @@
             fatalError("CardNumberTextField does not support NSCoder")
         }
 
+        /// Locale-specific `.lproj` sub-bundle resolved by
+        /// `MollieCardFormViewController` from the merchant's (possibly
+        /// overridden) locale. See `CardholderTextField.localizedBundle`
+        /// for the full rationale.
+        package var localizedBundle: Bundle? {
+            didSet {
+                placeholder = MollieLocalizedString(
+                    "card.number.placeholder",
+                    bundle: localizedBundle,
+                    comment: "Placeholder for the card-number field, showing the expected digit grouping."
+                )
+            }
+        }
+
         private func configure() {
-            placeholder = "1234 1234 1234 1234"
+            placeholder = MollieLocalizedString(
+                "card.number.placeholder",
+                comment: "Placeholder for the card-number field, showing the expected digit grouping."
+            )
             keyboardType = .numberPad
             autocorrectionType = .no
             spellCheckingType = .no

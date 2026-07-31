@@ -72,16 +72,30 @@
         private var revealTask: Task<Void, Never>?
         private var messageHandler: ThreeDSMessageHandler?
 
+        /// Resolved UI locale, threaded from `ThreeDSCoordinator`.
+        private let locale: Locale
+        /// Locale-specific `.lproj` sub-bundle resolved once at init from
+        /// `locale`, via `MolliePaymentsBundleLocator.localizedBundle(for:)`.
+        /// Threaded into every localized-string call site in this controller
+        /// (title, "Authenticating…" cover, Cancel button) instead of relying
+        /// on `NSLocalizedString`'s default system-preferred-language
+        /// selection — see the MolliePaymentsUI card-form counterpart for the
+        /// full rationale.
+        private let localizedBundle: Bundle
+
         init(
             challengeURL: URL,
             merchantReturnURL: URL? = nil,
             revealPolicy: RevealPolicy = .challengeDriven(watchdog: 15),
-            presentOnDemand: Bool = false
+            presentOnDemand: Bool = false,
+            locale: Locale = .current
         ) {
             self.challengeURL = challengeURL
             self.merchantReturnURL = merchantReturnURL
             self.revealPolicy = revealPolicy
             self.presentOnDemand = presentOnDemand
+            self.locale = locale
+            localizedBundle = MolliePaymentsBundleLocator.localizedBundle(for: locale)
             super.init(nibName: nil, bundle: nil)
         }
 
@@ -146,7 +160,11 @@
             webView.load(URLRequest(url: challengeURL))
             self.webView = webView
             webView.accessibilityElementsHidden = true
-            title = "3-D Secure"
+            title = MollieLocalizedString(
+                "threeds.title",
+                bundle: localizedBundle,
+                comment: "Navigation-bar title of the 3-D Secure challenge screen."
+            )
 
             if presentOnDemand {
                 // Hosted off-screen by the coordinator: no cover, nothing visible.
@@ -286,7 +304,11 @@
 
             let label = UILabel()
             label.translatesAutoresizingMaskIntoConstraints = false
-            label.text = "Authenticating securely…"
+            label.text = MollieLocalizedString(
+                "threeds.status.authenticating",
+                bundle: localizedBundle,
+                comment: "Status label shown on the cover while the 3-D Secure challenge loads."
+            )
             label.textColor = .secondaryLabel
             label.font = .preferredFont(forTextStyle: .body)
             label.textAlignment = .center
@@ -294,7 +316,14 @@
 
             let cancel = UIButton(type: .system)
             cancel.translatesAutoresizingMaskIntoConstraints = false
-            cancel.setTitle("Cancel", for: .normal)
+            cancel.setTitle(
+                MollieLocalizedString(
+                    "threeds.cancel",
+                    bundle: localizedBundle,
+                    comment: "Cancel button shown on the 3-D Secure 'Authenticating…' cover."
+                ),
+                for: .normal
+            )
             cancel.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
 
             cover.addSubview(spinner)

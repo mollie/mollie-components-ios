@@ -29,4 +29,8 @@ final class MollieBundleLocatorTests: XCTestCase {
     func test_mollieCoreBundleLocator_hasCorrectBundleName() {
         XCTAssertEqual(MollieCoreBundleLocator.bundleName, "MollieCore_MollieCore")
     }
+
+    func test_mollieCoreBundleLocator_usesSpmModuleBundle() {
+        XCTAssertNotNil(MollieCoreBundleLocator.spmResourcesBundle)
+    }
 }

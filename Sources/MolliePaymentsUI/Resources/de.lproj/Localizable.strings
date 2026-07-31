@@ -1,0 +1,64 @@
+/* Initial translations pending native-speaker / Crowdin review */
+
+/* Placeholder for the card-number field, showing the expected digit
+   grouping for a generic 16-digit card. */
+"card.number.placeholder" = "1234 1234 1234 1234";
+
+/* Placeholder for the card-security-code (CVC/CVV) field. */
+"card.cvc.placeholder" = "CVC";
+
+/* Accessibility label for the CVC field. The field intentionally does
+   NOT use secure text entry (masking is applied via accessibilityValue
+   instead), so this label must not claim "secure entry". */
+"card.cvc.accessibilityLabel" = "Sicherheitscode";
+
+/* Placeholder for the card-expiry field, showing the expected
+   month/year format. */
+"card.expiry.placeholder" = "MM/YY";
+
+/* Placeholder for the cardholder-name field. */
+"card.holder.placeholder" = "Vollständiger Name auf der Karte";
+
+/* Section header above the card-number/expiry/CVC group in the card
+   form. */
+"card.section.information" = "Kartendaten";
+
+/* Section header above the cardholder-name group in the card form. */
+"card.section.holder" = "Karteninhaber";
+
+/* Title of the primary call-to-action button that submits the card
+   form. */
+"form.payButton.title" = "Mit Karte bezahlen";
+
+/* Validation message shown when the cardholder-name field is empty. */
+"validation.cardholder.empty" = "Geben Sie den Namen auf Ihrer Karte ein.";
+
+/* Validation message shown when the card number has fewer digits than
+   any issuer-assigned PAN. */
+"validation.number.tooShort" = "Ihre Kartennummer scheint zu kurz zu sein.";
+
+/* Validation message shown when the card number has more digits than
+   any issuer-assigned PAN. */
+"validation.number.tooLong" = "Ihre Kartennummer scheint zu lang zu sein.";
+
+/* Validation message shown when the card number fails the Luhn
+   checksum, i.e. it contains a typo. */
+"validation.number.invalid" = "Überprüfen Sie Ihre Kartennummer auf Tippfehler.";
+
+/* Validation message shown when the CVC is not 3 or 4 digits long. */
+"validation.cvc.wrongLength" = "Der CVC muss aus 3 oder 4 Ziffern bestehen.";
+
+/* Validation message shown when the expiry field doesn't match the
+   MM/YY format. */
+"validation.expiry.malformed" = "Geben Sie das Ablaufdatum im Format MM/YY ein.";
+
+/* Validation message shown when the expiry month is not between 01
+   and 12. */
+"validation.expiry.monthOutOfRange" = "Der Ablaufmonat muss zwischen 01 und 12 liegen.";
+
+/* Validation message shown when the expiry date is in the past. */
+"validation.expiry.pastMonth" = "Das Ablaufdatum ist abgelaufen.";
+
+/* Validation message shown when the expiry date is implausibly far in
+   the future. */
+"validation.expiry.farFuture" = "Überprüfen Sie das Ablaufdatum.";

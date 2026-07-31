@@ -36,12 +36,20 @@
         /// `presentCard` never re-decodes a token it already validated.
         private let decodedClientToken: ClientToken
         public let endpoints: MollieEndpoints
-        /// Reserved for future localization — stored but not
-        /// yet wired to any user-facing string in the sheet. Defaults to
-        /// `.current` so merchants who pass it get the behaviour they'd
-        /// expect once localization ships, without needing a follow-up
-        /// migration.
+        /// Raw, unresolved merchant input, stored verbatim (never touched
+        /// after `.init`) so `PublicSurfaceTests` can keep asserting
+        /// `checkout.locale == .current` by default. Actual UI-language
+        /// selection is driven by `resolvedLocale` below, computed once at
+        /// init via `CardCheckoutRunner.resolveLocale(override:)` — this
+        /// property is intentionally a passthrough, not the source of
+        /// truth for what the form displays.
         public let locale: Locale
+        /// The locale actually threaded into the card form / 3DS UI: the
+        /// merchant's `locale` override if it (or its base language)
+        /// matches a shipped `.lproj` catalog, otherwise the system
+        /// locale's match, falling back to `en`. See
+        /// `CardCheckoutRunner.resolveLocale(override:)`.
+        private let resolvedLocale: Locale
         /// Backing store for `events`/`eventsPublisher` — a reference type so
         /// every copy of this `Sendable` value struct, and every attempt run
         /// through it, broadcasts into the same underlying stream. See
@@ -71,6 +79,7 @@
             rawClientToken = clientToken
             endpoints = .production
             self.locale = locale
+            resolvedLocale = CardCheckoutRunner.resolveLocale(override: locale)
             self.beforeSubmit = beforeSubmit
         }
 
@@ -107,7 +116,8 @@
                 theme: .default,
                 endpoints: endpoints,
                 checkoutEventSink: { [eventBridge] event in eventBridge.emit(event) },
-                beforeSubmit: beforeSubmit
+                beforeSubmit: beforeSubmit,
+                locale: resolvedLocale
             )
             let result = await coordinator.present(from: host)
             // Single choke point for the terminal event: `result` is what
@@ -138,6 +148,7 @@
                     endpoints: endpoints,
                     checkoutEventSink: { [eventBridge] event in eventBridge.emit(event) },
                     beforeSubmit: beforeSubmit,
+                    locale: resolvedLocale,
                     onFieldEvent: onFieldEvent,
                     onResult: { [eventBridge] result in
                         // Same single-choke-point reasoning as
@@ -180,6 +191,10 @@
         /// `CardPaymentCoordinator`. See its `beforeSubmit` doc comment for
         /// the await point and throw-handling contract.
         private let beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)?
+        /// Resolved locale (see `MollieCheckout.resolvedLocale`), threaded
+        /// into the card form and the 3DS UI so the merchant's override
+        /// wins over the device's own preferred languages.
+        private let locale: Locale
         private var resolver: Resolver?
         private weak var navigationController: UINavigationController?
         /// Tracks the in-flight tokenise/submit Task spawned by `handleSubmit`
@@ -195,7 +210,8 @@
             theme: MollieAppearance,
             endpoints: MollieEndpoints,
             checkoutEventSink: (@Sendable (MollieCheckoutEvent) -> Void)? = nil,
-            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil
+            beforeSubmit: (@Sendable () async throws -> MollieCustomerDetails?)? = nil,
+            locale: Locale = .current
         ) {
             self.clientToken = clientToken
             self.rawClientToken = rawClientToken
@@ -203,6 +219,7 @@
             self.endpoints = endpoints
             self.checkoutEventSink = checkoutEventSink
             self.beforeSubmit = beforeSubmit
+            self.locale = locale
         }
 
         func present(from host: UIViewController) async -> MolliePaymentResult {
@@ -235,7 +252,7 @@
                 await withCheckedContinuation { (continuation: CheckedContinuation<MolliePaymentResult, Never>) in
                     resolver = Resolver(continuation: continuation)
 
-                    let form = MollieCardFormViewController(theme: theme)
+                    let form = MollieCardFormViewController(theme: theme, locale: locale)
                     form.onSubmit = { [weak self] snapshot in
                         self?.handleSubmit(snapshot: snapshot)
                     }
@@ -314,7 +331,8 @@
                 endpoints: endpoints,
                 presentingViewController: nav,
                 checkoutEventSink: checkoutEventSink,
-                beforeSubmit: beforeSubmit
+                beforeSubmit: beforeSubmit,
+                locale: locale
             )
         }
 

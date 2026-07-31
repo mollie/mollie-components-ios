@@ -1,0 +1,64 @@
+/* Initial translations pending native-speaker / Crowdin review */
+
+/* Placeholder for the card-number field, showing the expected digit
+   grouping for a generic 16-digit card. */
+"card.number.placeholder" = "1234 1234 1234 1234";
+
+/* Placeholder for the card-security-code (CVC/CVV) field. */
+"card.cvc.placeholder" = "CVC";
+
+/* Accessibility label for the CVC field. The field intentionally does
+   NOT use secure text entry (masking is applied via accessibilityValue
+   instead), so this label must not claim "secure entry". */
+"card.cvc.accessibilityLabel" = "Beveiligingscode";
+
+/* Placeholder for the card-expiry field, showing the expected
+   month/year format. */
+"card.expiry.placeholder" = "MM/YY";
+
+/* Placeholder for the cardholder-name field. */
+"card.holder.placeholder" = "Naam op de kaart";
+
+/* Section header above the card-number/expiry/CVC group in the card
+   form. */
+"card.section.information" = "Kaartgegevens";
+
+/* Section header above the cardholder-name group in the card form. */
+"card.section.holder" = "Kaarthouder";
+
+/* Title of the primary call-to-action button that submits the card
+   form. */
+"form.payButton.title" = "Betalen met kaart";
+
+/* Validation message shown when the cardholder-name field is empty. */
+"validation.cardholder.empty" = "Vul de naam op je kaart in.";
+
+/* Validation message shown when the card number has fewer digits than
+   any issuer-assigned PAN. */
+"validation.number.tooShort" = "Je kaartnummer lijkt te kort.";
+
+/* Validation message shown when the card number has more digits than
+   any issuer-assigned PAN. */
+"validation.number.tooLong" = "Je kaartnummer lijkt te lang.";
+
+/* Validation message shown when the card number fails the Luhn
+   checksum, i.e. it contains a typo. */
+"validation.number.invalid" = "Controleer je kaartnummer op typefouten.";
+
+/* Validation message shown when the CVC is not 3 or 4 digits long. */
+"validation.cvc.wrongLength" = "CVC moet uit 3 of 4 cijfers bestaan.";
+
+/* Validation message shown when the expiry field doesn't match the
+   MM/YY format. */
+"validation.expiry.malformed" = "Vul de vervaldatum in als MM/YY.";
+
+/* Validation message shown when the expiry month is not between 01
+   and 12. */
+"validation.expiry.monthOutOfRange" = "Vervalmaand moet tussen 01 en 12 liggen.";
+
+/* Validation message shown when the expiry date is in the past. */
+"validation.expiry.pastMonth" = "De vervaldatum is verstreken.";
+
+/* Validation message shown when the expiry date is implausibly far in
+   the future. */
+"validation.expiry.farFuture" = "Controleer de vervaldatum.";

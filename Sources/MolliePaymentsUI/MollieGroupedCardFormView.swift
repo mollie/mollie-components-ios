@@ -34,7 +34,10 @@
         /// Section header above the "Card information" group.
         private let cardInfoLabel: UILabel = {
             let label = UILabel()
-            label.text = "Card information"
+            label.text = MollieLocalizedString(
+                "card.section.information",
+                comment: "Section header above the card-number/expiry/CVC group in the card form."
+            )
             label.adjustsFontForContentSizeCategory = true
             label.translatesAutoresizingMaskIntoConstraints = false
             return label
@@ -43,7 +46,10 @@
         /// Section header above the "Card holder" group.
         private let cardHolderLabel: UILabel = {
             let label = UILabel()
-            label.text = "Card holder"
+            label.text = MollieLocalizedString(
+                "card.section.holder",
+                comment: "Section header above the cardholder-name group in the card form."
+            )
             label.adjustsFontForContentSizeCategory = true
             label.translatesAutoresizingMaskIntoConstraints = false
             return label
@@ -399,6 +405,25 @@
         /// the SPM package.
         package var currentBrandSchemeForTesting: CardScheme? {
             brandIconView.currentSchemeForTesting
+        }
+
+        /// Re-resolve the section header labels against `bundle` — the
+        /// locale-specific `.lproj` sub-bundle the merchant's resolved
+        /// locale maps to (`nil` keeps the default system-preferred-
+        /// language behaviour). The four text fields resolve their own
+        /// placeholders independently via their `localizedBundle` property;
+        /// this only covers the two labels this view itself owns.
+        package func applyLocalizedBundle(_ bundle: Bundle?) {
+            cardInfoLabel.text = MollieLocalizedString(
+                "card.section.information",
+                bundle: bundle,
+                comment: "Section header above the card-number/expiry/CVC group in the card form."
+            )
+            cardHolderLabel.text = MollieLocalizedString(
+                "card.section.holder",
+                bundle: bundle,
+                comment: "Section header above the cardholder-name group in the card form."
+            )
         }
 
         /// Apply theme tokens to both border containers, dividers, field

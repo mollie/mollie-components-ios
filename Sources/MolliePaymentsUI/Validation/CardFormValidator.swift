@@ -54,18 +54,54 @@ package enum CardFormValidator {
         case expiry(ExpiryParser.ParseError)
         case cvcWrongLength
 
-        /// Short, merchant-presentable error string. Localisation lands when
-        /// the form gets a Localizable.strings table; for now this is the
-        /// canonical English form, sufficient for the form's alert and any test
-        /// assertion that needs to inspect the message verbatim.
+        /// Short, merchant-presentable error string, localized via
+        /// MolliePaymentsUI's `Localizable.strings`, using the system's
+        /// default bundle-selection. Kept for callers that predate the
+        /// locale-threading work; delegates to `userMessage(bundle:)`.
         package var userMessage: String {
+            userMessage(bundle: nil)
+        }
+
+        /// Short, merchant-presentable error string, localized via
+        /// MolliePaymentsUI's `Localizable.strings`. Also feeds the
+        /// per-field inline error captions (`MollieGroupedCardFormView`),
+        /// so this is the single source for both the alert and the
+        /// inline captions. `bundle`, when supplied, is the locale-specific
+        /// `.lproj` sub-bundle the merchant's resolved locale maps to
+        /// (`nil` keeps the default system-preferred-language behaviour).
+        package func userMessage(bundle: Bundle?) -> String {
             switch self {
-            case .missingCardholder: "Enter the name on your card."
-            case .panTooShort: "Your card number looks too short."
-            case .panTooLong: "Your card number looks too long."
-            case .panFailsLuhn: "Check your card number for typos."
-            case let .expiry(reason): Self.expiryMessage(reason)
-            case .cvcWrongLength: "CVC must be 3 or 4 digits."
+            case .missingCardholder:
+                MollieLocalizedString(
+                    "validation.cardholder.empty",
+                    bundle: bundle,
+                    comment: "Validation message shown when the cardholder-name field is empty."
+                )
+            case .panTooShort:
+                MollieLocalizedString(
+                    "validation.number.tooShort",
+                    bundle: bundle,
+                    comment: "Validation message shown when the card number has too few digits."
+                )
+            case .panTooLong:
+                MollieLocalizedString(
+                    "validation.number.tooLong",
+                    bundle: bundle,
+                    comment: "Validation message shown when the card number has too many digits."
+                )
+            case .panFailsLuhn:
+                MollieLocalizedString(
+                    "validation.number.invalid",
+                    bundle: bundle,
+                    comment: "Validation message shown when the card number fails the Luhn checksum."
+                )
+            case let .expiry(reason): Self.expiryMessage(reason, bundle: bundle)
+            case .cvcWrongLength:
+                MollieLocalizedString(
+                    "validation.cvc.wrongLength",
+                    bundle: bundle,
+                    comment: "Validation message shown when the CVC is not 3 or 4 digits long."
+                )
             }
         }
 
@@ -87,12 +123,32 @@ package enum CardFormValidator {
             }
         }
 
-        private static func expiryMessage(_ reason: ExpiryParser.ParseError) -> String {
+        private static func expiryMessage(_ reason: ExpiryParser.ParseError, bundle: Bundle?) -> String {
             switch reason {
-            case .malformed: "Enter expiry as MM/YY."
-            case .monthOutOfRange: "Expiry month must be between 01 and 12."
-            case .pastMonth: "Expiry date has passed."
-            case .farFuture: "Check the expiry date."
+            case .malformed:
+                MollieLocalizedString(
+                    "validation.expiry.malformed",
+                    bundle: bundle,
+                    comment: "Validation message shown when the expiry field doesn't match the MM/YY format."
+                )
+            case .monthOutOfRange:
+                MollieLocalizedString(
+                    "validation.expiry.monthOutOfRange",
+                    bundle: bundle,
+                    comment: "Validation message shown when the expiry month is not between 01 and 12."
+                )
+            case .pastMonth:
+                MollieLocalizedString(
+                    "validation.expiry.pastMonth",
+                    bundle: bundle,
+                    comment: "Validation message shown when the expiry date is in the past."
+                )
+            case .farFuture:
+                MollieLocalizedString(
+                    "validation.expiry.farFuture",
+                    bundle: bundle,
+                    comment: "Validation message shown when the expiry date is implausibly far in the future."
+                )
             }
         }
     }

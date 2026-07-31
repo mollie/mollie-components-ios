@@ -1,0 +1,10 @@
+/* Initial translations pending native-speaker / Crowdin review */
+
+/* Navigation-bar title of the 3-D Secure challenge screen. */
+"threeds.title" = "3-D Secure";
+
+/* Status label shown on the cover while the 3-D Secure challenge loads. */
+"threeds.status.authenticating" = "Authentification sécurisée en cours…";
+
+/* Cancel button shown on the 3-D Secure "Authenticating…" cover. */
+"threeds.cancel" = "Annuler";
