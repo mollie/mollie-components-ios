@@ -16,15 +16,15 @@
             let field = CardNumberTextField()
             XCTAssertFalse(
                 field.isSecureTextEntry,
-                "PAN must render as plaintext while typing — matches industry-standard card-entry UIs and the Mollie Web SDK. Hiding the digits drove typos and retries (which re-expose the PAN more than any screen recorder ever would). Other defences — copy/cut block, no dictation cache, masked accessibilityValue, lifecycle wipes — remain in place."
+                "PAN must render as plaintext while typing — matches industry-standard card-entry UIs and the Mollie Web SDK. Hiding the digits drove typos and retries (which re-expose the PAN more than any screen recorder ever would). This is a deliberate tradeoff: isSecureTextEntry is also what forces the system keyboard and locks out third-party keyboard extensions, but on a long, error-prone field that protection isn't worth the retry cost. Other defences — copy/cut block, no dictation cache, masked accessibilityValue, lifecycle wipes — remain in place."
             )
         }
 
-        func test_cvcField_isNotSecureEntry() {
+        func test_cvcField_isSecureEntry() {
             let field = CVCTextField()
-            XCTAssertFalse(
+            XCTAssertTrue(
                 field.isSecureTextEntry,
-                "CVC must render as plaintext while typing — users need to verify a 3-/4-digit code read off the back of the card. Same rationale + remaining defences as the PAN field."
+                "CVC must be in secure-entry mode. isSecureTextEntry is the only iOS control that forces the system keyboard, which locks third-party keyboard extensions out of this field even when the user has granted one Full Access. A 3-/4-digit code masks at negligible UX cost, and the CVC is what turns a stolen PAN into a usable card-not-present transaction — so unlike the PAN, the keyboard-extension lockout is worth taking here."
             )
         }
 

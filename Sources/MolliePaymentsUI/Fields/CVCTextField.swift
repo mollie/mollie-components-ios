@@ -37,12 +37,18 @@
             keyboardType = .numberPad
             autocorrectionType = .no
             spellCheckingType = .no
-            // Deliberately NOT `isSecureTextEntry`. Same reasoning as the
-            // PAN field: matches industry SDKs + Mollie Web SDK, and the
-            // user needs to verify a 3- or 4-digit code they typically
-            // read off the back of the card. Other defences (no
-            // dictation / QuickType cache, masked accessibilityValue,
-            // copy/cut blocked, lifecycle wipes) remain in place.
+            // `isSecureTextEntry` IS engaged here — unlike the PAN field.
+            // It's the only iOS control that forces the system keyboard,
+            // which locks third-party keyboard extensions out of this
+            // field even when the user has granted one Full Access. A
+            // 3- or 4-digit code masks at negligible UX cost (unlike the
+            // PAN, where masking drove typos and retries), and the CVC is
+            // what turns a stolen PAN into a usable card-not-present
+            // transaction — so the tradeoff is taken here, not there.
+            // Other defences (no dictation / QuickType cache, masked
+            // accessibilityValue, copy/cut blocked, lifecycle wipes)
+            // remain in place underneath it.
+            isSecureTextEntry = true
             smartInsertDeleteType = .no
             smartDashesType = .no
             smartQuotesType = .no
@@ -87,10 +93,10 @@
 
         /// Override the label so the spoken label is a clear, human-readable
         /// name for the field rather than the raw "CVC" placeholder. The
-        /// field deliberately does NOT use `isSecureTextEntry` (masking is
-        /// applied via `accessibilityValue` above instead), so the label
-        /// must not claim "secure entry" — that would misrepresent how the
-        /// field actually behaves to assistive tech users.
+        /// field also masks via `accessibilityValue` above as a
+        /// belt-and-braces measure — `isSecureTextEntry` alone doesn't
+        /// guarantee a masked spoken value on every assistive-tech
+        /// configuration.
         override package var accessibilityLabel: String? {
             get {
                 MollieLocalizedString(
